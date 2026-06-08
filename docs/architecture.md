@@ -85,7 +85,7 @@ JS → Event Collector API 로 request 이벤트 전송
     ↓
 유저 클릭 시 → click 이벤트 전송
     ↓
-전환 페이지 도달 시 → conversion 이벤트 전송
+전환 도달 시 → conversion 이벤트 전송
 ```
 
 > **웹 Fill Rate < 100%**: 페이지 이탈, Ad Blocker, 네트워크 지연 등으로 request 발생 후 impression이 찍히지 않는 경우 존재.
@@ -95,7 +95,6 @@ JS → Event Collector API 로 request 이벤트 전송
 [Criteo Attribution Dataset](https://huggingface.co/datasets/criteo/criteo-attribution-dataset)을 Kafka Producer로 실시간처럼 재생.
 
 - 총 약 1,600만 건의 클릭 이벤트
-- Day 1 백필(Backfill) + 지속적 시뮬레이션으로 사용
 
 **이벤트 합성 로직:**
 
@@ -144,7 +143,7 @@ banner_id = f"{row.campaign}_{row.cat1}_{row.cat2}"  # 파생 필요
 
 ---
 
-## 4. Kafka Topic 설계
+## 4. Kafka Topic 설계 - 아직 미정
 
 | Topic | 파티션 키 | 이벤트 설명 |
 |-------|----------|-------------|
@@ -170,13 +169,6 @@ banner_id = f"{row.campaign}_{row.cat1}_{row.cat2}"  # 파생 필요
 
 > `source` 필드로 웹 이벤트와 Criteo 재생 이벤트를 구분.
 
-**Topic 설정:**
-
-```
-파티션 수:    3개
-보존 기간:    7일 (장애 시 재처리 윈도우)
-복제 수:      1   (로컬 단일 브로커)
-```
 
 ---
 
@@ -192,7 +184,6 @@ banner_id = f"{row.campaign}_{row.cat1}_{row.cat2}"  # 파생 필요
 | 저장 형식 | Apache Iceberg |
 | 파티션 | `dt` (날짜), `hour` (시간) |
 | 변환 | 없음 (파티션 컬럼 추가만) |
-| 보존 정책 | 무기한 (백필 재처리 가능성 고려) |
 
 ```
 s3://bucket/bronze/
@@ -301,25 +292,39 @@ dt         | hour | request | impression | click | conversion | fill_rate | CTR 
 
 ## 8. 이벤트 발생 비율
 
-```
-웹 이벤트:
-  request 1건 → impression 0~1건 (fill rate < 100%, 이탈/광고차단 등)
-               → click 0~1건
-               → conversion 0~1건
-
-Criteo 재생:
-  click 1건 기준 역산
-  request 50건 → impression 40건 → click 1건 → conversion 0~1건
-```
-
-하루 100만 이벤트(클릭 기준) 처리 시:
+### 웹 이벤트 — 유저 1명 기준 퍼널
 
 ```
-ad-requests:    약 5,000만 건
-ad-impressions: 약 4,000만 건
-ad-clicks:      약 100만 건
-ad-conversions: 약 3.5만 건
+유저 1명이 페이지 접속
+  → request    1건 발생  (항상)
+  → impression 0~1건    (이탈·광고차단 시 미발생, fill rate < 100%)
+  → click      0~1건    (impression 발생한 경우에만 가능)
+  → conversion 0~1건    (click 발생한 경우에만 가능)
 ```
+
+### Criteo 재생 — 클릭 1건 기준 역산
+
+Criteo 원본에는 click과 conversion만 존재. request와 impression은 업계 평균으로 역산하여 합성 생성. (Producer가 Kafka에 넣는 시점에 스크립트로 생성)
+
+```
+click 1건이 나오기까지 앞에 있었을 이벤트:
+  request    50건  →  (fill rate 80%)  →  impression 40건  →  (CTR 2.5%)  →  click 1건
+                                                                               ↓
+                                                                         conversion 0~1건
+```
+
+### 일별 Kafka 토픽 이벤트 규모
+
+하루 클릭 100만 건(Criteo 기준) 처리 시 각 토픽에 쌓이는 메시지 수:
+
+```
+클릭 100만건 × 50  =  ad-requests    약 5,000만 건
+클릭 100만건 × 40  =  ad-impressions 약 4,000만 건
+클릭 100만건 × 1   =  ad-clicks      약   100만 건
+클릭 100만건 × 3.5% =  ad-conversions 약    3.5만 건
+```
+
+> 웹 이벤트는 실제 유저가 소수이므로 전체 볼륨의 대부분은 Criteo 재생 데이터가 차지한다.
 
 ---
 

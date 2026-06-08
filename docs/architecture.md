@@ -72,6 +72,9 @@
 ## 3. 데이터 소스
 
 ### 3-1. 웹 이벤트 (실시간)
+> open rtb(실제 광고업계 표준 값 참고해서 실제 처럼 구상하면 좋음) - 더미데이터 (참고)
+> https://iabtechlab.com/wp-content/uploads/2022/04/OpenRTB-2-6_FINAL.pdf
+
 
 자체 구축한 광고 배너 웹페이지에서 발생하는 진짜 실시간 이벤트.
 
@@ -152,7 +155,7 @@ banner_id = f"{row.campaign}_{row.cat1}_{row.cat2}"  # 파생 필요
 | `ad-clicks` | `campaign_id` | 유저 클릭 |
 | `ad-conversions` | `campaign_id` | 구매 전환 |
 
-**공통 이벤트 스키마: - 추후 개발하면서 변경될 수 있음**
+**공통 이벤트 스키마: - 추후 개발하면서 변경될 수 있음** - 실무 
 
 ```json
 {

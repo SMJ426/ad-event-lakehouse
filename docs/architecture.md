@@ -71,12 +71,35 @@
 
 ## 3. 데이터 소스
 
-### 3-1. 웹 이벤트 (실시간)
-> open rtb(실제 광고업계 표준 값 참고해서 실제 처럼 구상하면 좋음) - 더미데이터 (참고)
-> https://iabtechlab.com/wp-content/uploads/2022/04/OpenRTB-2-6_FINAL.pdf
+> **OpenRTB 2.6 표준 참고:** 이벤트 스키마는 실제 광고 업계 표준인 [OpenRTB 2.6](https://iabtechlab.com/wp-content/uploads/2022/04/OpenRTB-2-6_FINAL.pdf) 을 기반으로 설계한다.
 
+### 3-1. 더미 데이터 생성기 (주요 볼륨 소스)
 
-자체 구축한 광고 배너 웹페이지에서 발생하는 진짜 실시간 이벤트.
+OpenRTB 표준을 참고한 더미 데이터를 대량으로 생성하는 스크립트. 파이프라인의 **주요 볼륨 소스**로 사용한다.
+
+```python
+# dummy_generator.py
+# 초당 N건의 광고 이벤트를 실시간처럼 지속 생성
+
+while True:
+    for _ in range(EVENTS_PER_SECOND):
+        event = generate_openrtb_event(
+            campaigns=CAMPAIGN_POOL,    # 사전 정의된 캠페인 풀
+            banners=BANNER_POOL,        # 사전 정의된 배너 풀
+            devices=DEVICE_TYPES,       # mobile / pc / tablet
+        )
+        producer.send(topic(event), event)
+    time.sleep(1)
+```
+
+**웹 이벤트 대비 장점:**
+- 초당 수천 건 생성 가능 → 대용량 파이프라인 검증
+- 파라미터 조절로 트래픽 패턴 자유롭게 시뮬레이션
+- 피크 타임, 이상 트래픽 등 시나리오 재현 가능
+
+### 3-2. 웹 이벤트 (실시간 실증)
+
+자체 구축한 광고 배너 웹페이지에서 발생하는 진짜 실시간 이벤트. **소량이지만 실제 실시간 경로가 동작함을 증명**하는 용도.
 
 ```
 페이지 로드
@@ -93,7 +116,7 @@ JS → Event Collector API 로 request 이벤트 전송
 
 > **웹 Fill Rate < 100%**: 페이지 이탈, Ad Blocker, 네트워크 지연 등으로 request 발생 후 impression이 찍히지 않는 경우 존재.
 
-### 3-2. Criteo Attribution Dataset (시뮬레이션)
+### 3-3. Criteo Attribution Dataset (백필)
 
 [Criteo Attribution Dataset](https://huggingface.co/datasets/criteo/criteo-attribution-dataset)을 Kafka Producer로 실시간처럼 재생.
 
@@ -155,22 +178,46 @@ banner_id = f"{row.campaign}_{row.cat1}_{row.cat2}"  # 파생 필요
 | `ad-clicks` | `campaign_id` | 유저 클릭 |
 | `ad-conversions` | `campaign_id` | 구매 전환 |
 
-**공통 이벤트 스키마: - 추후 개발하면서 변경될 수 있음** - 실무 
+**공통 이벤트 스키마** (OpenRTB 2.6 기반, 추후 개발하면서 변경될 수 있음)
 
 ```json
 {
-  "event_id":    "uuid4",
-  "event_type":  "click",
-  "source":      "web | criteo",
-  "banner_id":   "CAMP_042_A_X",
-  "campaign_id": "CAMP_042",
-  "uid":         "user_abc123",
+  "event_id":    "uuid4",                  // 이벤트 고유 ID
+  "event_type":  "request",               // request | impression | click | conversion
+  "source":      "dummy | web | criteo",  // 데이터 출처 구분
+
+  // OpenRTB BidRequest 기반
+  "auction_id":  "uuid4",                 // 경매 단위 묶음 ID (BidRequest.id)
+  "banner_id":   "BANNER_001",
+  "campaign_id": 12345678,
+
+  // OpenRTB Banner 기반
+  "banner_w":    300,                     // 배너 너비 (px)
+  "banner_h":    250,                     // 배너 높이 (px)
+  "banner_pos":  1,                       // 노출 위치 (1=above fold, 3=below fold)
+
+  // OpenRTB Site 기반
+  "site_domain": "news.example.com",
+  "site_cat":    "IAB12",                 // IAB 카테고리
+
+  // OpenRTB Device 기반
+  "device_type": 1,                       // 1=mobile, 2=pc, 5=tablet
+  "os":          "android",
+  "country":     "KR",
+
+  // OpenRTB User 기반
+  "uid":         "user_abc123",           // User.id
+
+  // 광고 비용
+  "floor_price": 0.5,                    // 최소 입찰가 (CPM, USD)
+  "bid_price":   0.8,                    // 낙찰 금액
+
   "timestamp":   1456790400,
   "produced_at": "2024-01-15T10:00:00Z"
 }
 ```
 
-> `source` 필드로 웹 이벤트와 Criteo 재생 이벤트를 구분.
+> `source` 필드로 dummy / web / criteo 이벤트를 구분한다.
 
 
 ---
@@ -291,6 +338,8 @@ dt         | hour | request | impression | click | conversion | fill_rate | CTR 
 | 대시보드 | 별도 오픈소스| -- |
 | 인프라 | K8s (EKS) | AWS |
 
+> ⚠️ **Spark on K8s 구현 난이도 주의**: Spark on EKS는 구현 난이도가 매우 높다. 초기에는 로컬 Docker 또는 AWS Glue ETL로 파이프라인을 먼저 완성한 뒤, K8s 전환을 단계적으로 진행하는 것을 권장한다.
+
 ---
 
 ## 8. 이벤트 발생 비율
@@ -331,7 +380,62 @@ click 1건이 나오기까지 앞에 있었을 이벤트:
 
 ---
 
-## 9. 장애 대응 시나리오
+## 9. 운영 가시성
+
+> 파이프라인이 잘 설계됐어도, 운영 중 문제를 빠르게 감지하고 대응하지 못하면 의미가 없다.
+> **"운영자가 매일 5분 안에 파이프라인 헬스체크를 할 수 있는가"** 를 기준으로 설계한다.
+
+### 발생 가능한 문제들
+
+| 문제 | 증상 | 원인 |
+|------|------|------|
+| Spark Streaming 중단 | Bronze 신선도 저하 | OOM, Pod 재시작 |
+| Kafka 적체 | Consumer lag 증가 | Spark 처리 속도 < 유입 속도 |
+| 더미 생성기 중단 | 이벤트 수 급감 | 스크립트 오류 |
+| Silver 버그 | 집계 KPI 이상 | 정제 로직 오류 |
+| 중복 이벤트 급증 | event_id 중복률 증가 | Producer 재시작 중복 발행 |
+
+### Iceberg 메타 테이블 기반 헬스 쿼리
+
+Iceberg는 테이블 상태를 조회할 수 있는 메타 테이블을 제공한다.
+
+```sql
+-- 1. Bronze 신선도 확인 (마지막 적재 시각)
+SELECT committed_at, summary['added-records'] AS added_rows
+FROM bronze.ad_clicks.snapshots
+ORDER BY committed_at DESC LIMIT 1;
+
+-- 2. 시간당 이벤트 수 이상 감지
+SELECT hour, COUNT(*) AS cnt
+FROM bronze.ad_clicks
+WHERE dt = current_date
+GROUP BY hour ORDER BY hour;
+
+-- 3. Iceberg 파일 수 / 평균 크기 확인 (small file 감지)
+SELECT COUNT(*) AS file_count,
+       AVG(file_size_in_bytes) / 1024 / 1024 AS avg_size_mb
+FROM bronze.ad_clicks.files;
+
+-- 4. 스냅샷 누적 수 확인 (컴팩션 필요 여부)
+SELECT COUNT(*) AS snapshot_count
+FROM bronze.ad_clicks.snapshots;
+
+-- 5. Silver 중복 이벤트 비율
+SELECT COUNT(*) - COUNT(DISTINCT event_id) AS duplicate_count
+FROM silver.processed_events
+WHERE event_date = current_date;
+```
+
+### 운영 대시보드 탭 구성
+
+```
+비즈니스 KPI 탭:  CTR / CVR / ROAS 추이
+운영 메트릭 탭:   Bronze 신선도 / 이벤트 수 / Iceberg 파일 상태
+```
+
+---
+
+## 11. 장애 대응 시나리오
 
 ### 새벽 OOM 장애
 
@@ -340,7 +444,7 @@ click 1건이 나오기까지 앞에 있었을 이벤트:
 
 ---
 
-## 10. Slack 알림
+## 12. Slack 알림
 
 ### 구조
 
@@ -365,6 +469,6 @@ Airflow: KPI 이상 여부 체크 (Athena 쿼리)
 
 ---
 
-## 11. 100x 스케일 아웃 시나리오 (설계)
+## 13. 100x 스케일 아웃 시나리오 (설계)
 
 일 100만 → 일 1억 이벤트로 성장 시:

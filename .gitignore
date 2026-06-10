@@ -1,0 +1,91 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+
+# 가상환경 디렉토리
+# requirements.txt 로 언제든 재현 가능하므로 git에 올릴 필요 없음
+.venv/
+venv/
+env/
+
+# Python 바이트코드 캐시
+# 소스 코드(.py)가 있으면 실행 시 자동 재생성됨
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 테스트/패키지 캐시
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── 데이터 ─────────────────────────────────────────────────────────────────────
+
+# 로컬에 저장하는 원천 데이터 파일 (대용량, git에 올리지 않음)
+data/
+
+# HuggingFace 캐시는 홈 디렉토리(~/.cache/huggingface/)에 저장되므로
+# .gitignore로 제어할 수 없음. 별도로 관리할 것.
+
+# ── AWS / 보안 ─────────────────────────────────────────────────────────────────
+
+# 환경변수 파일 (AWS_ACCESS_KEY_ID 등 민감 정보 포함 가능)
+.env
+*.env
+.env.*
+
+# 인증서 및 키 파일
+*.pem
+*.key
+*.p12
+*.pfx
+
+# AWS 임시 자격증명 (로컬 오버라이드용으로 쓸 경우 대비)
+.aws-credentials
+
+# ── Infra / K8s ────────────────────────────────────────────────────────────────
+
+# Terraform 상태 파일 (민감한 인프라 정보 포함 가능)
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# K8s 클러스터 접근 키
+kubeconfig
+kubeconfig.*
+.kubeconfig
+
+# eksctl 생성 임시 파일
+*.eksctl.yaml.bak
+
+# ── IDE / 에디터 ───────────────────────────────────────────────────────────────
+
+# JetBrains (PyCharm, IntelliJ 등)
+.idea/
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook 체크포인트
+.ipynb_checkpoints/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# ── 로그 ──────────────────────────────────────────────────────────────────────
+
+*.log
+logs/

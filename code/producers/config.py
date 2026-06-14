@@ -8,10 +8,15 @@ config.py — Producer 공통 설정
   EKS Kafka 세팅 완료 후 KAFKA_BOOTSTRAP_SERVERS 값을 바꾸는 것이 주요 변경 지점이다.
 """
 
+import os
+
 # ── Kafka 연결 ─────────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-# EKS Strimzi Kafka 배포 후 NodePort 또는 LoadBalancer 주소로 변경 예정.
-# 예) "a1b2c3d4.ap-northeast-2.elb.amazonaws.com:9092"
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+# 기본값: localhost:9092 — 호스트(맥북)에서 직접 python 실행할 때.
+# 컨테이너로 실행 시 환경변수로 오버라이드: KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+#   (같은 Docker 네트워크 안에서는 서비스 이름 kafka로 접속)
+# EKS 전환 시: NodePort 또는 LoadBalancer 주소로 오버라이드.
+#   예) "a1b2c3d4.ap-northeast-2.elb.amazonaws.com:9092"
 
 # ── Kafka 토픽명 ───────────────────────────────────────────────────────────────
 TOPIC_REQUESTS    = "ad-requests"

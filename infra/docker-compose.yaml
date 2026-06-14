@@ -1,58 +1,76 @@
 # 로컬 개발용 Kafka 환경 (KRaft 모드)
 #
-# 실행:
+# 구성:
+#   kafka       — Kafka 단일 브로커 (KRaft)
+#   kafka-init  — 토픽 4개 생성 후 종료 (일회성)
+#   producer    — dummy_generator.py 상시 실행 (실시간 이벤트 전송)
+#
+# 전체 파이프라인 입구를 한 번에 기동:
 #   docker compose up -d
-#   ./kafka-topics.sh   # 토픽 생성
+#     → kafka 기동 → (healthy) → kafka-init 토픽 생성 → (완료) → producer 시작
 #
 # 종료:
-#   docker compose down
+#   docker compose down        # 컨테이너 종료, 볼륨 유지 (메시지 보존)
+#   docker compose down -v     # 컨테이너 + 볼륨 전부 삭제 (완전 초기화)
 #
-# 데이터 영속화 (재시작해도 메시지 유지):
-#   docker compose down        # 컨테이너만 종료, 볼륨 유지
-#   docker compose down -v     # 컨테이너 + 볼륨 전부 삭제
+# 호스트에서 직접 producer를 돌리고 싶으면 (개발 중 빠른 반복):
+#   docker compose up -d kafka kafka-init   # 인프라만 기동
+#   cd ../code/producers && python dummy_generator.py
 
 services:
+  # ════════════════════════════════════════════════════════════════════════
+  # Kafka 브로커
+  # ════════════════════════════════════════════════════════════════════════
   kafka:
     image: apache/kafka:3.9.0
     # Kafka 3.7(2024-04)부터 공식 Apache 이미지 제공. Bitnami 대신 사용.
     container_name: kafka
     ports:
-      - "9092:9092"   # Producer / Consumer 접속 포트 (localhost:9092)
+      - "9092:9092"   # 호스트(맥북)에서 접속하는 포트 (localhost:9092)
     environment:
       # ── KRaft 기본 설정 ────────────────────────────────────────────────
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       # 단일 노드가 controller(메타데이터 관리) + broker(메시지 저장) 역할을 동시 수행
 
-      # ── Listener 설정 ──────────────────────────────────────────────────
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      # PLAINTEXT:9092 — 외부 Producer/Consumer 통신
+      # ── Listener 설정 (접속 경로가 2개라 listener도 2개) ──────────────
+      KAFKA_LISTENERS: HOST://:9092,DOCKER://:29092,CONTROLLER://:9093
+      # HOST:9092       — 호스트(맥북)의 python이 접속
+      # DOCKER:29092    — 같은 Docker 네트워크의 컨테이너(producer, kafka-init)가 접속
       # CONTROLLER:9093 — KRaft 내부 Raft 합의 통신 (외부 노출 안 함)
+      # ※ HOST/DOCKER/CONTROLLER는 임의로 붙인 '이름표'다. 아래 PROTOCOL_MAP에서
+      #   각 이름표에 실제 보안 프로토콜을 연결한다.
 
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      # Producer가 "Kafka는 localhost:9092에 있다"고 인식하게 하는 주소
-      # EKS 전환 시 이 값을 ELB 주소로 변경 (config.py의 KAFKA_BOOTSTRAP_SERVERS와 동일)
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,DOCKER://kafka:29092
+      # 클라이언트가 최초 접속 후 "실제로 메시지를 보낼 주소"로 돌려받는 값.
+      #   호스트 python    → localhost:9092 로 접속 → localhost:9092 응답 → OK
+      #   컨테이너 producer → kafka:29092 로 접속    → kafka:29092 응답    → OK
+      # 한 종류만 두면 다른 쪽에서 접속 실패한다. 그래서 2개가 필요하다.
 
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT
+      # 각 listener 이름표 → 보안 프로토콜. 로컬이라 전부 PLAINTEXT(암호화 없음).
+
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # KRaft 합의에 참여하는 노드 목록 + controller가 쓸 listener 이름표.
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      # 브로커 간 통신에 쓸 listener. listener 이름을 바꾸면 기본 추론이 안 돼서 명시 필요.
+      # 내부 네트워크 주소(DOCKER)를 사용. 단일 브로커라 실제 통신은 없지만 설정은 필수.
 
       # ── 토픽 기본값 ────────────────────────────────────────────────────
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      # 토픽을 자동 생성하지 않음. kafka-topics.sh로 명시적으로 생성한다.
-      # 파티션 수, 복제 인수를 직접 제어하기 위해.
+      # 토픽 자동 생성 비활성화. kafka-init이 파티션/복제/보존을 명시 제어한다.
 
       KAFKA_LOG_RETENTION_HOURS: 720
       # 브로커 기본 보존 기간: 30일. 토픽별 retention.ms 설정이 우선 적용된다.
-      # (requests/impressions=72h, clicks=14d, conversions=30d — kafka-topics.sh 참고)
 
       # ── 단일 브로커 환경 필수 설정 ────────────────────────────────────
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      # Kafka 내부 토픽(__consumer_offsets, __transaction_state)의 복제 인수 기본값은 3.
-      # 브로커가 1개이면 "Not enough replicas" 오류로 기동 직후 실패한다.
-      # EKS(브로커 3개)로 전환 시 이 값을 3으로 올릴 것.
+      # 내부 토픽(__consumer_offsets, __transaction_state) 복제 인수 기본값은 3.
+      # 브로커가 1개이면 "Not enough replicas" 오류 발생. EKS(브로커 3개) 전환 시 3으로.
 
     volumes:
       - kafka-data:/var/lib/kafka/data
@@ -64,8 +82,40 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
-      # Kafka가 완전히 뜰 때까지 기다린다.
-      # kafka-topics.sh 실행 전에 healthy 상태인지 확인할 것.
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 토픽 생성 (일회성 — 토픽 만들고 종료)
+  # ════════════════════════════════════════════════════════════════════════
+  kafka-init:
+    image: apache/kafka:3.9.0
+    # kafka-topics.sh CLI가 들어있는 동일 이미지 재사용.
+    depends_on:
+      kafka:
+        condition: service_healthy   # Kafka가 healthy가 된 뒤에 실행
+    environment:
+      BOOTSTRAP: kafka:29092                          # Docker 네트워크 주소로 접속
+      KAFKA_BIN: /opt/kafka/bin/kafka-topics.sh       # docker exec 없이 CLI 직접 호출
+    volumes:
+      - ./kafka-topics.sh:/scripts/kafka-topics.sh:ro  # 호스트 스크립트를 읽기전용 마운트
+    entrypoint: ["bash", "/scripts/kafka-topics.sh"]
+    # 토픽 생성이 끝나면 스크립트가 종료되고 컨테이너도 함께 종료된다 (일회성).
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Producer (상시 실행 — 실시간 이벤트 전송)
+  # ════════════════════════════════════════════════════════════════════════
+  producer:
+    build:
+      context: ../code/producers      # Dockerfile 위치
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully  # 토픽 생성 완료 후 시작
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # config.py가 이 값으로 오버라이드
+      PYTHONUNBUFFERED: "1"                   # print 출력을 버퍼링 없이 즉시 로그로 (docker logs)
+    command: ["python", "dummy_generator.py"]
+    # criteo_producer로 바꾸려면: ["python", "criteo_producer.py"]
+    restart: always
+    # 죽으면 자동 재시작 (운영 단계 동작을 로컬에서 미리 검증).
 
 volumes:
   kafka-data:

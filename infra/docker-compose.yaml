@@ -113,10 +113,58 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # config.py가 이 값으로 오버라이드
       PYTHONUNBUFFERED: "1"                   # print 출력을 버퍼링 없이 즉시 로그로 (docker logs)
     command: ["python", "dummy_generator.py"]
-    # criteo_producer로 바꾸려면: ["python", "criteo_producer.py"]
     restart: always
     # 죽으면 자동 재시작 (운영 단계 동작을 로컬에서 미리 검증).
 
+  producer-criteo:
+    build:
+      context: ../code/producers      # producer와 동일 이미지
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PYTHONUNBUFFERED: "1"
+      CRITEO_REPLAY_INTERVAL: "0.05"   # 행당 0.05초 대기 → 폭주 방지, 소비속도와 균형
+    command: ["python", "criteo_producer.py"]
+    restart: always
+    # Criteo Attribution Dataset 재생. HuggingFace 스트리밍 다운로드로 초기 기동이 느릴 수 있음.
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Bronze 적재 (Kafka → S3 Iceberg, Spark Structured Streaming)
+  # ════════════════════════════════════════════════════════════════════════
+  spark-bronze:
+    build:
+      context: ../code/pipelines
+    user: root
+    # 로컬 개발 편의: ivy 캐시 볼륨/마운트된 ~/.aws를 uid 충돌 없이 읽고 쓰기 위해 root 실행.
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully   # 토픽이 있어야 구독 가능
+    environment:
+      S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정 — infra/.env에 S3_BUCKET=... 기록하거나 export 필요}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      AWS_REGION: ap-northeast-2
+      AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials   # AWS SDK v2 (Iceberg S3FileIO)
+      AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials  # AWS SDK v1 (hadoop-aws s3a)
+      AWS_CONFIG_FILE: /opt/spark/.aws/config
+      MAX_OFFSETS_PER_TRIGGER: "150000"   # 배치당 15만 → 분당 15만 소비 > 유입 ~11만 → 백로그 감소
+    volumes:
+      - ${HOME}/.aws:/opt/spark/.aws:ro          # 호스트 AWS 자격증명 (읽기전용)
+      - ivy-cache:/opt/spark/.ivy2               # jar 캐시 (재다운로드 방지)
+    command:
+      - /opt/spark/bin/spark-submit
+      - --driver-memory
+      - 2g
+      - --packages
+      - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0,org.apache.iceberg:iceberg-aws-bundle:1.11.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4
+      - --conf
+      - spark.jars.ivy=/opt/spark/.ivy2
+      - /opt/spark/work-dir/bronze_stream.py
+    restart: on-failure
+
 volumes:
   kafka-data:
+    driver: local
+  ivy-cache:
     driver: local

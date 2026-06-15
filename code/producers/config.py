@@ -2,7 +2,7 @@
 config.py — Producer 공통 설정
 
 역할:
-  dummy_generator.py와 criteo_producer.py 양쪽에서 참조하는 설정값 모음.
+  dummy_producer.py와 criteo_producer.py 양쪽에서 참조하는 설정값 모음.
   값을 바꿀 때 코드를 건드리지 않고 이 파일 하나만 수정하면 된다.
 
   EKS Kafka 세팅 완료 후 KAFKA_BOOTSTRAP_SERVERS 값을 바꾸는 것이 주요 변경 지점이다.

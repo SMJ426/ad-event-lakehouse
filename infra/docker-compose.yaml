@@ -3,7 +3,7 @@
 # 구성:
 #   kafka       — Kafka 단일 브로커 (KRaft)
 #   kafka-init  — 토픽 4개 생성 후 종료 (일회성)
-#   producer    — dummy_generator.py 상시 실행 (실시간 이벤트 전송)
+#   producer-dummy   — dummy_producer.py 상시 실행 (실시간 이벤트 전송)
 #
 # 전체 파이프라인 입구를 한 번에 기동:
 #   docker compose up -d
@@ -15,7 +15,7 @@
 #
 # 호스트에서 직접 producer를 돌리고 싶으면 (개발 중 빠른 반복):
 #   docker compose up -d kafka kafka-init   # 인프라만 기동
-#   cd ../code/producers && python dummy_generator.py
+#   cd ../code/producers && python dummy_producer.py
 
 services:
   # ════════════════════════════════════════════════════════════════════════
@@ -103,7 +103,7 @@ services:
   # ════════════════════════════════════════════════════════════════════════
   # Producer (상시 실행 — 실시간 이벤트 전송)
   # ════════════════════════════════════════════════════════════════════════
-  producer:
+  producer-dummy:
     build:
       context: ../code/producers      # Dockerfile 위치
     depends_on:
@@ -112,7 +112,7 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # config.py가 이 값으로 오버라이드
       PYTHONUNBUFFERED: "1"                   # print 출력을 버퍼링 없이 즉시 로그로 (docker logs)
-    command: ["python", "dummy_generator.py"]
+    command: ["python", "dummy_producer.py"]
     restart: always
     # 죽으면 자동 재시작 (운영 단계 동작을 로컬에서 미리 검증).
 

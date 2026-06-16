@@ -1,13 +1,13 @@
 """
-dummy_generator.py — 합성 광고 이벤트 무한 생성기
+dummy_producer.py — 합성 광고 이벤트 무한 생성 Producer
 
 역할:
   사전에 정의한 Campaign/Banner 풀에서 OpenRTB 형식의 이벤트를 랜덤 조합으로
   생성하여 Kafka로 무한 전송한다. 파이프라인의 주요 볼륨 소스.
 
 실행:
-  python dummy_generator.py           # Kafka로 실제 전송
-  DRY_RUN=true python dummy_generator.py  # Kafka 미전송, 이벤트 구조 출력만
+  python dummy_producer.py           # Kafka로 실제 전송
+  DRY_RUN=true python dummy_producer.py  # Kafka 미전송, 이벤트 구조 출력만
 
 퍼널(깔때기) 흐름 (1 auction = 1 루프 반복):
   auction_id 생성

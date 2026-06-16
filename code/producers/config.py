@@ -2,7 +2,7 @@
 config.py — Producer 공통 설정
 
 역할:
-  dummy_generator.py와 criteo_producer.py 양쪽에서 참조하는 설정값 모음.
+  dummy_producer.py와 criteo_producer.py 양쪽에서 참조하는 설정값 모음.
   값을 바꿀 때 코드를 건드리지 않고 이 파일 하나만 수정하면 된다.
 
   EKS Kafka 세팅 완료 후 KAFKA_BOOTSTRAP_SERVERS 값을 바꾸는 것이 주요 변경 지점이다.
@@ -31,11 +31,11 @@ DUMMY_EPS = 100
 # impression/click/conversion은 퍼널 비율에 따라 확률적으로 추가 발생.
 
 # ── Criteo 재생 속도 ───────────────────────────────────────────────────────────
-CRITEO_REPLAY_INTERVAL = 0.0
-# 행 하나 처리 후 대기 시간 (초).
-# 0.0 = 최대 속도 (16.5M건을 가능한 빠르게 재생).
-# 0.001 = 초당 약 1,000행 처리.
-# 실시간처럼 보이게 하고 싶으면 값을 높인다.
+CRITEO_REPLAY_INTERVAL = float(os.environ.get("CRITEO_REPLAY_INTERVAL", "0.0"))
+# 행 하나 처리 후 대기 시간 (초). 환경변수로 오버라이드 (인프라단에서 rate 조절).
+# 0.0  = 최대 속도 → Kafka에 폭주, 소비(Spark)가 못 따라가 백로그 폭증.
+# 0.05 = 초당 약 20행 → 행당 91이벤트이므로 초당 약 1,800이벤트 (현실적 재생).
+# 클수록 느림. 소비속도(Spark maxOffsetsPerTrigger)와 균형을 맞춘다.
 
 # ── 광고 퍼널 비율 ─────────────────────────────────────────────────────────────
 # 아키텍처 문서 8번 "이벤트 발생 비율" 섹션의 수치와 일치해야 한다.

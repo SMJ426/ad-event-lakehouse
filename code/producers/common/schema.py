@@ -2,7 +2,7 @@
 schema.py — 이벤트 스키마 정의
 
 Producer별 원칙:
-  - dummy_generator  → AdEvent: OpenRTB 형식으로 직접 생성. 파생 컬럼 없음.
+  - dummy_producer   → AdEvent: OpenRTB 형식으로 직접 생성. 파생 컬럼 없음.
   - criteo_producer  → CriteoRawEvent: Criteo 원본 필드를 변환 없이 그대로 담음.
 
 Bronze = raw 원칙:
@@ -24,7 +24,7 @@ from dataclasses import dataclass, asdict
 @dataclass
 class AdEvent:
     """
-    dummy_generator 전용 이벤트 스키마.
+    dummy_producer 전용 이벤트 스키마.
 
     더미 이벤트는 처음부터 OpenRTB 형식으로 생성되므로
     모든 필드가 원본이다. 파생 컬럼 없음.

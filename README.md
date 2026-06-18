@@ -64,6 +64,14 @@ Bronze 파티션 dt/hour는 kafka_timestamp에서 뽑는데 Spark가 UTC 기준�
 
 → Bronze는 raw라 UTC(Kafka 수신시각) 그대로 두는 게 맞다. KST 변환/파티셔닝을 Silver·Gold에서 할지는 추후 결정.
 
+> 8. Silver dedup 정책(latest wins)과 데이터 오염
+
+Silver dedup은 event_id 중복 시 ingested_at 최신 1건을 남긴다(latest wins). 우리 시뮬레이터에선 중복이 "동일 내용의 재처리"라 어느 쪽을 남겨도 결과가 같다(중복 읽기는 sliding window/재실행에서 의도적으로 발생).
+
+의문: 만약 두 번째로 들어온 데이터가 오염됐다면? → latest wins라 오염된 최신본이 남는 위험이 있다.
+
+→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. 현재 Silver엔 validation 미구현 → 추후 추가. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+
 # 광고 이벤트 레이크하우스
 
 ## 1. 도메인 정의 + 핵심 KPI 3개

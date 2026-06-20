@@ -189,7 +189,7 @@ def read_bronze_window(spark: SparkSession, window_days: int, hour: int | None =
         df = spark.table(f"{CATALOG}.bronze.{t}").where(
             F.col("dt") >= F.date_format(F.date_sub(F.current_date(), window_days), "yyyy-MM-dd")
         )
-        if hour is not None:
+        if hour is not None and hour >= 0:   # -1 또는 None = 전체 hour
             df = df.where(F.col("hour") == hour)
         parts.append(df.select("value", "ingested_at"))
     return reduce(DataFrame.unionByName, parts)

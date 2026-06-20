@@ -1,0 +1,158 @@
+# Silver 오케스트레이션 스택 (Airflow + Spark standalone 클러스터)
+#
+# Bronze 스트리밍 스택(docker-compose.yaml)과 분리된 별도 스택이다.
+# Silver는 S3의 Bronze만 읽으므로 kafka/producer가 필요 없다.
+#
+# 실행:
+#   1) Spark 클러스터만:  docker compose -f docker-compose.airflow.yaml up -d spark-master spark-worker
+#   2) 전체(Airflow 포함): docker compose -f docker-compose.airflow.yaml up -d
+#
+# UI:
+#   Spark master  → http://localhost:8081
+#   Airflow web   → http://localhost:8082  (admin/admin)
+#
+# 종료: docker compose -f docker-compose.airflow.yaml down
+
+name: silver-airflow   # 별도 프로젝트명 (Bronze 스택과 분리)
+
+x-spark-env: &spark-env
+  S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정 — infra/.env에 기록 필요}
+  AWS_REGION: ap-northeast-2
+  AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials   # SDK v2 (Iceberg S3FileIO)
+  AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials  # SDK v1
+  AWS_CONFIG_FILE: /opt/spark/.aws/config
+
+services:
+  # ════════════════════════════════════════════════════════════════════════
+  # Spark standalone 클러스터 (기존 infra-spark-bronze 이미지 재활용)
+  # ════════════════════════════════════════════════════════════════════════
+  spark-master:
+    image: infra-spark-bronze:latest   # Bronze 단계에서 빌드한 이미지 (Spark+Java17+jar+잡)
+    container_name: spark-master
+    user: root
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+    environment: *spark-env
+    ports:
+      - "7077:7077"   # 제출 포트 (spark://spark-master:7077)
+      - "8081:8080"   # master UI (호스트 8081 → 컨테이너 8080)
+    volumes:
+      - ${HOME}/.aws:/opt/spark/.aws:ro
+      - ivy-cache:/opt/spark/.ivy2
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 최신 silver 잡 코드 라이브 반영
+
+  spark-worker:
+    image: infra-spark-bronze:latest
+    container_name: spark-worker
+    user: root
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_MEMORY: 5g    # silver 잡(dedup/MERGE)이 무거워 넉넉히
+      SPARK_WORKER_CORES: 4
+    volumes:
+      - ${HOME}/.aws:/opt/spark/.aws:ro
+      - ivy-cache:/opt/spark/.ivy2
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 최신 silver 잡 코드 라이브 반영
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Airflow (공식 multi-container, LocalExecutor)
+  # ════════════════════════════════════════════════════════════════════════
+  airflow-postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    build:
+      context: ./airflow
+    container_name: airflow-init
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    environment: &airflow-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: "ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg="
+      # webserver↔scheduler 로그 서버 인증용 — 모든 컴포넌트가 같은 값이어야 UI 로그 조회 가능
+      AIRFLOW__WEBSERVER__SECRET_KEY: "ad-lakehouse-silver-airflow-secret-key-fixed"
+      # silver 잡(드라이버)이 쓸 값
+      S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정}
+      AWS_REGION: ap-northeast-2
+      AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials
+      AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials
+      AWS_CONFIG_FILE: /opt/spark/.aws/config
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags
+      - ${HOME}/.aws:/opt/spark/.aws:ro
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username admin --password admin \
+          --firstname a --lastname d --role Admin --email admin@example.com || true
+        airflow connections add spark_default \
+          --conn-type spark --conn-host spark://spark-master --conn-port 7077 || true
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler   # task가 보고하는 호스트명 고정 → webserver가 로그 서버(8793) 찾을 수 있게
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags
+      - ${HOME}/.aws:/opt/spark/.aws:ro
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
+    command: scheduler
+    restart: always
+
+  airflow-webserver:
+    build:
+      context: ./airflow
+    container_name: airflow-webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags
+      - ${HOME}/.aws:/opt/spark/.aws:ro
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
+    ports:
+      - "8082:8080"   # Airflow UI (호스트 8082)
+    command: webserver
+    restart: always
+
+volumes:
+  ivy-cache:
+    external: true
+    name: infra_ivy-cache   # Bronze 스택의 ivy 캐시 재사용 (jar 재다운로드 방지)
+  airflow-pgdata:
+    driver: local

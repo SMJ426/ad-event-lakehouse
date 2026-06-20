@@ -74,6 +74,27 @@ Silver dedup은 event_id 중복 시 ingested_at 최신 1건을 남긴다(latest 
 
 [질문] 이러한 문제도 실무에선 PM이나 경영진의 정책 결정으로 판단하게 되는 것인지?
 
+> 9. Airflow Executor 선택 — LocalExecutor (두뇌+일꾼 겸함)
+
+Silver Airflow를 LocalExecutor로 구성 → scheduler가 스케줄링(두뇌)과 task 실행(일꾼)을 겸한다. 실무는 보통 CeleryExecutor(Redis+Worker 분리)나 KubernetesExecutor(task마다 Pod)로 두뇌와 일꾼을 분리한다. 무거운 task가 scheduler를 마비시키지 않게 하려는 것.
+
+그럼 왜 LocalExecutor? → **우리는 "일꾼 분리"를 Executor 레벨이 아니라 Spark 클러스터 레벨에서 이미 했다.** DAG task는 spark-submit "제출"만 하고(가벼움), 진짜 무거운 계산(dedup/MERGE/수백만 행)은 별도 Spark 클러스터(worker)가 한다. 그러니 Airflow Executor는 방아쇠만 당기면 돼서 scheduler가 겸해도 마비되지 않는다.
+
+추가로 CeleryExecutor는 컨테이너가 6개+로 늘어 디스크 부담(이전 48GB 풀 경험)이 크고, DAG 1개 학습 환경엔 오버엔지니어링.
+
+→ 단일 브로커·체크포인트와 동일 패턴: 로컬은 단순(LocalExecutor), 진짜 분리는 EKS 단계(KubernetesExecutor + Spark on K8s)에서. 단 LocalExecutor는 단일 머신이라 Airflow 자체의 수평 확장은 안 됨 — 우리 경우 task가 가벼워 병목이 아니고, 확장이 필요한 지점은 Spark 클러스터 쪽임.
+
+> 10. Spark 클러스터 단일 worker — 수평 확장과 EKS 대안
+
+지금 Spark는 standalone master 1 + worker 1(4코어/5GB). 무거우면 느려지고(worker 1대 한계) 단일 장애점(SPOF)이다. standalone은 worker 추가가 쉽지만(master 주소만 같으면 자동 등록), **로컬에서 worker를 늘려도 결국 같은 맥북의 CPU·RAM을 나눠 쓰는 것**이라 물리 총량은 그대로 → 진짜 확장이 아니라 흉내. (1 worker 8코어 ≈ 2 worker 4코어, 총량 동일)
+
+진짜 수평 확장 = 여러 물리 노드 필요. EKS(Spark on K8s)가 한 방법이지만 유일하진 않음:
+- **매니지드 Spark (가장 자연스러운 대안)**: AWS Glue(서버리스 Spark ETL), EMR/EMR Serverless, Databricks, GCP Dataproc. 클러스터·K8s 관리 없이 진짜 분산 컴퓨팅. 우리는 이미 Glue Catalog+S3+Athena를 쓰므로 **Glue나 EMR Serverless가 최적** — 같은 silver 잡을 거기서 돌리면 됨.
+- EC2 여러 대로 Spark standalone, 다른 클라우드 K8s 등도 가능.
+→ 즉 self-managed(EKS)냐 managed(Glue/EMR)냐의 선택. 학습·인프라 제어가 목적이면 EKS, 운영 단순·비용 최적이면 매니지드. 로컬 standalone은 어차피 검증용.
+
+[TODO/리팩토링] 로컬에서 처리량 증가는 안 되지만, **worker 수를 늘릴 수 있는 구조를 미리 짜두자**(예: docker compose `--scale spark-worker=N` 또는 worker 서비스 복제 가능하게). 처리량 목적이 아니라 멀티 worker 분산·등록·일 분배 동작을 검증하고, EKS/매니지드 전환 시 노드만 늘리면 되도록 리허설하는 목적. 추후 refactor 단계에서 반영.
+
 # 광고 이벤트 레이크하우스
 
 ## 1. 도메인 정의 + 핵심 KPI 3개

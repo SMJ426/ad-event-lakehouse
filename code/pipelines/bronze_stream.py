@@ -105,6 +105,10 @@ def ensure_tables(spark: SparkSession) -> None:
             )
             USING iceberg
             PARTITIONED BY (dt, hour)
+            TBLPROPERTIES (
+                'format-version' = '2',
+                'write.target-file-size-bytes' = '134217728'
+            )
             """
         )
     print(f"[INFO] Bronze 테이블 준비 완료: {list(TOPIC_TO_TABLE.values())}")

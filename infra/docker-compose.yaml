@@ -112,9 +112,10 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092   # config.py가 이 값으로 오버라이드
       PYTHONUNBUFFERED: "1"                   # print 출력을 버퍼링 없이 즉시 로그로 (docker logs)
+      DUMMY_MAX_AUCTIONS: "${DUMMY_MAX_AUCTIONS:-0}"   # 0=무제한, N=N건 후 종료 (적정량 수집)
     command: ["python", "dummy_producer.py"]
-    restart: always
-    # 죽으면 자동 재시작 (운영 단계 동작을 로컬에서 미리 검증).
+    restart: on-failure
+    # 크래시 시에만 재시작. MAX 도달 정상 종료(code 0)면 재시작 안 함(무한 반복 방지).
 
   producer-criteo:
     build:
@@ -125,9 +126,11 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       PYTHONUNBUFFERED: "1"
-      CRITEO_REPLAY_INTERVAL: "0.05"   # 행당 0.05초 대기 → 폭주 방지, 소비속도와 균형
+      CRITEO_REPLAY_INTERVAL: "${CRITEO_REPLAY_INTERVAL:-0.05}"   # 행당 대기(초). 폭주 방지, 소비속도와 균형
+      CRITEO_MAX_ROWS: "${CRITEO_MAX_ROWS:-0}"   # 0=무제한, N=N행 후 종료 (적정량 수집)
     command: ["python", "criteo_producer.py"]
-    restart: always
+    restart: on-failure
+    # 크래시 시에만 재시작. MAX 도달 정상 종료(code 0)면 재시작 안 함(무한 반복 방지).
     # Criteo Attribution Dataset 재생. HuggingFace 스트리밍 다운로드로 초기 기동이 느릴 수 있음.
 
   # ════════════════════════════════════════════════════════════════════════

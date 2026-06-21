@@ -70,7 +70,9 @@ Silver dedup은 event_id 중복 시 ingested_at 최신 1건을 남긴다(latest 
 
 의문: 만약 두 번째로 들어온 데이터가 오염됐다면? → latest wins라 오염된 최신본이 남는 위험이 있다.
 
-→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. 현재 Silver엔 validation 미구현 → 추후 추가. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+
+**(업데이트) validation 구현 완료** (`silver_processed.py`의 `validate()`): null_event_id / bad_event_type / null_campaign_id / null_uid / negative_cost / timestamp_out_of_range 6규칙으로 무효 행을 적재 전 **drop**하고, 사유별 제거 건수를 잡 로그에 남긴다. validation은 dedup **앞**에 둔다(null event_id가 dedup partitionBy를 오염시키는 것 방지). 처음엔 무효 행을 별도 quarantine 테이블(rejected_events)로 격리하는 방식도 검토했으나, 운영 복잡도 대비 이득이 적어 **drop + 로그 관측**으로 단순화. ⚠️ criteo는 device_type/os/country가 정상 NULL이라 검사 대상에서 제외(공통 키만 null 검사) — 안 그러면 criteo 273만 행이 통째로 걸러진다.
 
 [질문] 이러한 문제도 실무에선 PM이나 경영진의 정책 결정으로 판단하게 되는 것인지?
 
@@ -105,6 +107,19 @@ Silver Airflow를 LocalExecutor로 구성 → scheduler가 스케줄링(두뇌)�
 - `restart: always` → `on-failure`: **유일하게 상용 표준에서 벗어난 실제 변경.** 상한 도달 정상 종료(exit 0)를 Docker가 재시작해 재생을 무한 반복하는 걸 막으려 바꿨다. 그런데 24/7 상시 서비스는 보통 `always`/`unless-stopped`가 표준(데몬·호스트 재부팅, 정상 종료에도 자동 복구). `on-failure`도 크래시(비정상 종료) 복구는 되지만 재부팅 자동 기동은 안 된다. → 상용 전환 시 **`unless-stopped`로 환원**해야 한다.
 
 → **상용 전환 체크리스트**: ① producer를 실제 이벤트 소스로 교체하며 MAX_ROWS/MAX_AUCTIONS/REPLAY_INTERVAL 제거, ② producer `restart` 정책을 `unless-stopped`로 환원. 정리하면 이 설정들은 "조용히 깨지진 않지만 상용으로 그대로 들고 가면 안 되는" 로컬·시뮬레이션 전용 장치다.
+
+> 12. Iceberg 매니지먼트 자동화 — 적재와 유지보수의 분리
+
+Small File 문제(Bronze 60초 마이크로배치가 테이블당 작은 parquet 양산)와 스냅샷·매니페스트 무한 누적을 해결하기 위해 **compaction / expire_snapshots / remove_orphan_files**를 Airflow DAG(`iceberg_maintenance`)로 자동화했다(`code/pipelines/iceberg_maintenance.py`). 실측: Bronze 4테이블 각 19개 작은 파일(평균 2.5MB) → 컴팩션 후 1개(47.5MB), 스냅샷 20→5(만료).
+
+**설계 결정**:
+- **적재 ≠ 유지보수 분리**: 유지보수를 적재 잡(bronze_stream/silver_processed)과 별도 잡·별도 DAG로 뒀다. 유지보수가 실패해도 적재 파이프라인은 영향이 없다.
+- **순서 = compaction → expire → orphan**: 컴팩션이 새 스냅샷(operation=replace)을 만든 뒤, expire가 구 스냅샷을, orphan이 어디서도 참조 안 되는 파일을 회수한다. 순서가 거꾸로면 회수할 대상이 아직 안 생긴다.
+- **OCC(낙관적 동시성) 대응**: `rewrite_data_files`는 commit 시 base 스냅샷이 바뀌면 충돌을 감지해 실패시킨다(손상 없음). 회피책으로 ① `iceberg_maintenance`(04:00)와 `silver_processed`(자정) **시간대 분리**, ② `partial-progress.enabled`로 충돌 그룹만 실패·나머지 부분 커밋. (architecture §11-3)
+
+**구현 중 겪은 실제 이슈 2가지**:
+- `remove_orphan_files`는 `older_than < 24h`를 **Iceberg가 차단**한다(동시 작업 중 in-flight 파일 손상 방지). → 잡에서 24h 미만은 24h로 클램프 + 경고.
+- orphan은 테이블 위치(`s3://`)를 **Hadoop FileSystem으로 직접 리스팅**하는데, 적재 잡은 `s3a` 체크포인트만 써서 클러스터에 `hadoop-aws`가 없었고 `s3` 스킴 매핑도 없었다. → `fs.s3.impl=S3AFileSystem` 설정 + `hadoop-aws`/`aws-java-sdk-bundle` jar를 `--jars`에 추가(S3FileIO만 쓰는 compaction/expire와 달리 orphan만의 추가 의존성).
 
 # 광고 이벤트 레이크하우스
 

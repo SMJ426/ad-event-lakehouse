@@ -47,3 +47,9 @@ TBLPROPERTIES (
     'write.delete.mode' = 'copy-on-write',
     'write.target-file-size-bytes' = '134217728'
 );
+
+-- 품질 검증(validation): silver_processed.py가 적재 전 무효 행을 drop한다.
+--   규칙: null_event_id / bad_event_type / null_campaign_id / null_uid / negative_cost
+--        / timestamp_out_of_range (architecture §5-2).
+--   drop된 행은 별도 테이블로 보존하지 않고, 잡 로그에 사유별 건수만 남긴다.
+--   (criteo의 정상 NULL device/os/country는 검사 대상이 아님 — 오제거 방지)

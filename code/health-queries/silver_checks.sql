@@ -43,3 +43,16 @@ SELECT committed_at, operation,
 FROM silver.processed_events.snapshots
 ORDER BY committed_at DESC
 LIMIT 10;
+
+-- ── 7. 품질 검증(validation) 관측 ───────────────────────────────────────────
+-- 무효 행은 silver_processed.py가 적재 전 drop하고, 사유별 건수는 잡 로그에 남긴다
+-- (별도 격리 테이블 없음). Airflow task 로그의 "validation 완료 — drop된 행 분포"에서 확인.
+-- 적재 결과 측면의 품질은 아래로 점검:
+--   (a) NULL 키가 통과 안 했는지 (기대 0)
+SELECT count(*) AS null_key_rows
+FROM silver.processed_events
+WHERE event_id IS NULL OR campaign_id IS NULL OR uid IS NULL;
+--   (b) 음수 cost가 통과 안 했는지 (기대 0)
+SELECT count(*) AS negative_cost_rows
+FROM silver.processed_events
+WHERE cost < 0;

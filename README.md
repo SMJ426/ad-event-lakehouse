@@ -70,9 +70,56 @@ Silver dedup은 event_id 중복 시 ingested_at 최신 1건을 남긴다(latest 
 
 의문: 만약 두 번째로 들어온 데이터가 오염됐다면? → latest wins라 오염된 최신본이 남는 위험이 있다.
 
-→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. 현재 Silver엔 validation 미구현 → 추후 추가. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+
+**(업데이트) validation 구현 완료** (`silver_processed.py`의 `validate()`): null_event_id / bad_event_type / null_campaign_id / null_uid / negative_cost / timestamp_out_of_range 6규칙으로 무효 행을 적재 전 **drop**하고, 사유별 제거 건수를 잡 로그에 남긴다. validation은 dedup **앞**에 둔다(null event_id가 dedup partitionBy를 오염시키는 것 방지). 처음엔 무효 행을 별도 quarantine 테이블(rejected_events)로 격리하는 방식도 검토했으나, 운영 복잡도 대비 이득이 적어 **drop + 로그 관측**으로 단순화. ⚠️ criteo는 device_type/os/country가 정상 NULL이라 검사 대상에서 제외(공통 키만 null 검사) — 안 그러면 criteo 273만 행이 통째로 걸러진다.
 
 [질문] 이러한 문제도 실무에선 PM이나 경영진의 정책 결정으로 판단하게 되는 것인지?
+
+> 9. Airflow Executor 선택 — LocalExecutor (두뇌+일꾼 겸함)
+
+Silver Airflow를 LocalExecutor로 구성 → scheduler가 스케줄링(두뇌)과 task 실행(일꾼)을 겸한다. 실무는 보통 CeleryExecutor(Redis+Worker 분리)나 KubernetesExecutor(task마다 Pod)로 두뇌와 일꾼을 분리한다. 무거운 task가 scheduler를 마비시키지 않게 하려는 것.
+
+그럼 왜 LocalExecutor? → **우리는 "일꾼 분리"를 Executor 레벨이 아니라 Spark 클러스터 레벨에서 이미 했다.** DAG task는 spark-submit "제출"만 하고(가벼움), 진짜 무거운 계산(dedup/MERGE/수백만 행)은 별도 Spark 클러스터(worker)가 한다. 그러니 Airflow Executor는 방아쇠만 당기면 돼서 scheduler가 겸해도 마비되지 않는다.
+
+추가로 CeleryExecutor는 컨테이너가 6개+로 늘어 디스크 부담(이전 48GB 풀 경험)이 크고, DAG 1개 학습 환경엔 오버엔지니어링.
+
+→ 단일 브로커·체크포인트와 동일 패턴: 로컬은 단순(LocalExecutor), 진짜 분리는 EKS 단계(KubernetesExecutor + Spark on K8s)에서. 단 LocalExecutor는 단일 머신이라 Airflow 자체의 수평 확장은 안 됨 — 우리 경우 task가 가벼워 병목이 아니고, 확장이 필요한 지점은 Spark 클러스터 쪽임.
+
+> 10. Spark 클러스터 단일 worker — 수평 확장과 EKS 대안
+
+지금 Spark는 standalone master 1 + worker 1(4코어/5GB). 무거우면 느려지고(worker 1대 한계) 단일 장애점(SPOF)이다. standalone은 worker 추가가 쉽지만(master 주소만 같으면 자동 등록), **로컬에서 worker를 늘려도 결국 같은 맥북의 CPU·RAM을 나눠 쓰는 것**이라 물리 총량은 그대로 → 진짜 확장이 아니라 흉내. (1 worker 8코어 ≈ 2 worker 4코어, 총량 동일)
+
+진짜 수평 확장 = 여러 물리 노드 필요. EKS(Spark on K8s)가 한 방법이지만 유일하진 않음:
+- **매니지드 Spark (가장 자연스러운 대안)**: AWS Glue(서버리스 Spark ETL), EMR/EMR Serverless, Databricks, GCP Dataproc. 클러스터·K8s 관리 없이 진짜 분산 컴퓨팅. 우리는 이미 Glue Catalog+S3+Athena를 쓰므로 **Glue나 EMR Serverless가 최적** — 같은 silver 잡을 거기서 돌리면 됨.
+- EC2 여러 대로 Spark standalone, 다른 클라우드 K8s 등도 가능.
+→ 즉 self-managed(EKS)냐 managed(Glue/EMR)냐의 선택. 학습·인프라 제어가 목적이면 EKS, 운영 단순·비용 최적이면 매니지드. 로컬 standalone은 어차피 검증용.
+
+[TODO/리팩토링] 로컬에서 처리량 증가는 안 되지만, **worker 수를 늘릴 수 있는 구조를 미리 짜두자**(예: docker compose `--scale spark-worker=N` 또는 worker 서비스 복제 가능하게). 처리량 목적이 아니라 멀티 worker 분산·등록·일 분배 동작을 검증하고, EKS/매니지드 전환 시 노드만 늘리면 되도록 리허설하는 목적. 추후 refactor 단계에서 반영.
+
+> 11. 재수집용 producer 설정(MAX_ROWS / MAX_AUCTIONS / restart 정책)의 상용 함의
+
+**왜 추가했나**: criteo 시뮬레이터가 유한 데이터셋을 무제한 시간 재생하면 수천만 행으로 폭주해 Silver 전량 적재 시 OOM이 났다. 그래서 원천 데이터를 0부터 지우고 **적정량만 재수집**하기로 했고(약 277만 이벤트), 양을 결정적으로 제어하려고 `CRITEO_MAX_ROWS`/`DUMMY_MAX_AUCTIONS`(상한 도달 시 producer 자동 종료) + `restart: on-failure`를 도입했다. 목적은 Gold 대시보드용 깨끗한 데이터 확보.
+
+**상용에서 걸림돌이 되는가** — 기본값이 안전(`0=무제한`)이라 켜지 않으면 상용 동작 그대로다. 다만 둘 다 본질적으로 "시뮬레이터라서 생긴" 설정이다:
+
+- `CRITEO_MAX_ROWS` / `DUMMY_MAX_AUCTIONS`: 애초에 producer가 유한 데이터셋을 재생하는 **시뮬레이터**라 존재하는 knob. 상용에선 producer가 실제 광고 SDK·실시간 이벤트 소스로 대체되며 "최대 행 수" 개념 자체가 사라진다(`CRITEO_REPLAY_INTERVAL`도 동일한 시뮬레이션 throttle). → 상용 전환 시 **제거**되는 개발 전용 설정. 기본 0이라 그대로 둬도 상용 동작은 안 깨짐.
+- `restart: always` → `on-failure`: **유일하게 상용 표준에서 벗어난 실제 변경.** 상한 도달 정상 종료(exit 0)를 Docker가 재시작해 재생을 무한 반복하는 걸 막으려 바꿨다. 그런데 24/7 상시 서비스는 보통 `always`/`unless-stopped`가 표준(데몬·호스트 재부팅, 정상 종료에도 자동 복구). `on-failure`도 크래시(비정상 종료) 복구는 되지만 재부팅 자동 기동은 안 된다. → 상용 전환 시 **`unless-stopped`로 환원**해야 한다.
+
+→ **상용 전환 체크리스트**: ① producer를 실제 이벤트 소스로 교체하며 MAX_ROWS/MAX_AUCTIONS/REPLAY_INTERVAL 제거, ② producer `restart` 정책을 `unless-stopped`로 환원. 정리하면 이 설정들은 "조용히 깨지진 않지만 상용으로 그대로 들고 가면 안 되는" 로컬·시뮬레이션 전용 장치다.
+
+> 12. Iceberg 매니지먼트 자동화 — 적재와 유지보수의 분리
+
+Small File 문제(Bronze 60초 마이크로배치가 테이블당 작은 parquet 양산)와 스냅샷·매니페스트 무한 누적을 해결하기 위해 **compaction / expire_snapshots / remove_orphan_files**를 Airflow DAG(`iceberg_maintenance`)로 자동화했다(`code/pipelines/iceberg_maintenance.py`). 실측: Bronze 4테이블 각 19개 작은 파일(평균 2.5MB) → 컴팩션 후 1개(47.5MB), 스냅샷 20→5(만료).
+
+**설계 결정**:
+- **적재 ≠ 유지보수 분리**: 유지보수를 적재 잡(bronze_stream/silver_processed)과 별도 잡·별도 DAG로 뒀다. 유지보수가 실패해도 적재 파이프라인은 영향이 없다.
+- **순서 = compaction → expire → orphan**: 컴팩션이 새 스냅샷(operation=replace)을 만든 뒤, expire가 구 스냅샷을, orphan이 어디서도 참조 안 되는 파일을 회수한다. 순서가 거꾸로면 회수할 대상이 아직 안 생긴다.
+- **OCC(낙관적 동시성) 대응**: `rewrite_data_files`는 commit 시 base 스냅샷이 바뀌면 충돌을 감지해 실패시킨다(손상 없음). 회피책으로 ① `iceberg_maintenance`(04:00)와 `silver_processed`(자정) **시간대 분리**, ② `partial-progress.enabled`로 충돌 그룹만 실패·나머지 부분 커밋. (architecture §11-3)
+
+**구현 중 겪은 실제 이슈 2가지**:
+- `remove_orphan_files`는 `older_than < 24h`를 **Iceberg가 차단**한다(동시 작업 중 in-flight 파일 손상 방지). → 잡에서 24h 미만은 24h로 클램프 + 경고.
+- orphan은 테이블 위치(`s3://`)를 **Hadoop FileSystem으로 직접 리스팅**하는데, 적재 잡은 `s3a` 체크포인트만 써서 클러스터에 `hadoop-aws`가 없었고 `s3` 스킴 매핑도 없었다. → `fs.s3.impl=S3AFileSystem` 설정 + `hadoop-aws`/`aws-java-sdk-bundle` jar를 `--jars`에 추가(S3FileIO만 쓰는 compaction/expire와 달리 orphan만의 추가 의존성).
 
 # 광고 이벤트 레이크하우스
 

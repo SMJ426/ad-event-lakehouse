@@ -60,6 +60,9 @@ FINAL_COLS = [
     "conversion_delay_sec", "updated_at",
 ]
 
+# 허용 event_type 화이트리스트 (validate용)
+VALID_EVENT_TYPES = ["request", "impression", "click", "conversion"]
+
 # ── source별 JSON 스키마 ─────────────────────────────────────────────────────
 DUMMY_SCHEMA = StructType([
     StructField("event_id", StringType()),
@@ -189,7 +192,7 @@ def read_bronze_window(spark: SparkSession, window_days: int, hour: int | None =
         df = spark.table(f"{CATALOG}.bronze.{t}").where(
             F.col("dt") >= F.date_format(F.date_sub(F.current_date(), window_days), "yyyy-MM-dd")
         )
-        if hour is not None:
+        if hour is not None and hour >= 0:   # -1 또는 None = 전체 hour
             df = df.where(F.col("hour") == hour)
         parts.append(df.select("value", "ingested_at"))
     return reduce(DataFrame.unionByName, parts)
@@ -244,6 +247,41 @@ def parse_criteo(raw: DataFrame) -> DataFrame:
         F.when(F.col("event_type") == "conversion", F.lit(1)).otherwise(F.lit(0)).alias("conversion"),
         "ingested_at",
     )
+
+
+# ── 2.5 품질 검증 (validation) ────────────────────────────────────────────────
+
+def validate(unified: DataFrame) -> tuple[DataFrame, DataFrame]:
+    """품질 규칙으로 reject_reason을 매긴 뒤 valid / rejected로 분리.
+
+    무효 행은 통과시키지 않는다(drop). 단 제거 건수·사유는 run()에서 로그로 남겨
+    데이터 품질을 관측할 수 있게 한다(별도 격리 테이블은 두지 않음).
+    주의: criteo는 device_type/os/country가 정상 NULL이므로, null 검사는 두 source
+    공통 키(event_id / campaign_id / uid)에만 적용한다 (오격리 방지).
+    when 체인은 첫 매치가 우선이다.
+    """
+    ts_lower = F.lit("2020-01-01 00:00:00").cast("timestamp")
+    ts_upper = F.expr("current_timestamp() + INTERVAL 1 DAY")
+
+    reason = (
+        F.when(F.col("event_id").isNull(), "null_event_id")
+        .when(~F.col("event_type").isin(VALID_EVENT_TYPES), "bad_event_type")
+        .when(F.col("campaign_id").isNull(), "null_campaign_id")
+        .when(F.col("uid").isNull(), "null_uid")
+        .when(F.col("cost") < 0, "negative_cost")
+        .when(
+            F.col("event_timestamp").isNull()
+            | (F.col("event_timestamp") < ts_lower)
+            | (F.col("event_timestamp") > ts_upper),
+            "timestamp_out_of_range",
+        )
+        .otherwise(F.lit(None).cast("string"))
+    )
+
+    tagged = unified.withColumn("reject_reason", reason)
+    valid = tagged.where(F.col("reject_reason").isNull()).drop("reject_reason")
+    rejected = tagged.where(F.col("reject_reason").isNotNull())
+    return valid, rejected
 
 
 # ── 3. dedup ─────────────────────────────────────────────────────────────────
@@ -323,7 +361,13 @@ def run(window_days: int, hour: int | None = None) -> None:
 
     raw = read_bronze_window(spark, window_days, hour)
     unified = parse_dummy(raw).unionByName(parse_criteo(raw))
-    deduped = dedup(unified)
+
+    # 품질 검증: 무효 행은 drop하고 valid만 다음 단계로. 제거 사유·건수는 로그로 관측.
+    valid, rejected = validate(unified)
+    print("[INFO] validation 완료 — drop된 행 분포(이번 run, 사유별):")
+    rejected.groupBy("reject_reason").count().orderBy(F.col("count").desc()).show(20, truncate=False)
+
+    deduped = dedup(valid)
     final_df = enrich_conversion_delay(spark, deduped)
 
     merge_into(spark, final_df)

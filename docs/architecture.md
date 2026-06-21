@@ -253,14 +253,26 @@ s3://bucket/bronze/
 | 스케줄 | 매 정시 (Airflow) |
 | 처리 내용 | 중복 제거, 이상값 제거, 스키마 통일 |
 
-**정제 규칙:**
+**정제 규칙** (구현: `silver_processed.py`의 `validate()` — 적재 전 무효 행 drop):
 
 ```
-- event_id 기준 중복 이벤트 제거
-- cost < 0 인 레코드 제거
-- timestamp 범위 이상값 제거
-- uid / campaign_id / banner_id null 제거
+- event_id 기준 중복 이벤트 제거 (dedup, ROW_NUMBER latest wins)
+- 품질 검증(validation)으로 무효 행 제거 → reject_reason 단위:
+    null_event_id          : event_id NULL (dedup 키, 반드시 dedup 앞에서 거름)
+    bad_event_type         : event_type ∉ {request,impression,click,conversion}
+    null_campaign_id       : campaign_id NULL
+    null_uid               : uid NULL
+    negative_cost          : cost < 0   (cost=0은 정상 — request/impression)
+    timestamp_out_of_range : event_timestamp NULL / < 2020-01-01 / > now()+1day
 ```
+
+> 설계 노트:
+> - **drop + 로그**: 무효 행은 통과시키지 않고 버리되, 잡 로그에 사유별 건수를 남겨 품질을
+>   관측한다(별도 격리 테이블은 두지 않음 — 단순성 우선).
+> - **dedup ≠ validation**: dedup은 "같은 걸 두 번 안 세기", validation은 "옳지 않은 값 거르기".
+>   둘은 다른 책임이며 validation을 dedup **앞**에 둔다(null event_id가 dedup을 오염시키지 않게).
+> - **criteo 오제거 방지**: criteo는 device_type/os/country가 정상 NULL이므로 검사하지 않는다.
+>   null 검사는 두 source 공통 키(event_id/campaign_id/uid)에만 적용.
 
 ```
 s3://bucket/silver/

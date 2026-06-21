@@ -70,7 +70,9 @@ Silver dedup은 event_id 중복 시 ingested_at 최신 1건을 남긴다(latest 
 
 의문: 만약 두 번째로 들어온 데이터가 오염됐다면? → latest wins라 오염된 최신본이 남는 위험이 있다.
 
-→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. 현재 Silver엔 validation 미구현 → 추후 추가. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+→ 정리: dedup은 "같은 걸 두 번 안 세는 것"이지 "옳은 값을 고르는 것"이 아니다. 오염 방어는 dedup이 아니라 **별도 품질 검증 규칙**(cost<0 제거, 범위 이상값 제거 등 — architecture.md 정제 규칙)의 몫. latest wins를 고른 이유는 "나중 도착 = 보정된 정확한 버전"이라는 파이프라인 표준 가정.
+
+**(업데이트) validation 구현 완료** (`silver_processed.py`의 `validate()`): null_event_id / bad_event_type / null_campaign_id / null_uid / negative_cost / timestamp_out_of_range 6규칙으로 무효 행을 적재 전 **drop**하고, 사유별 제거 건수를 잡 로그에 남긴다. validation은 dedup **앞**에 둔다(null event_id가 dedup partitionBy를 오염시키는 것 방지). 처음엔 무효 행을 별도 quarantine 테이블(rejected_events)로 격리하는 방식도 검토했으나, 운영 복잡도 대비 이득이 적어 **drop + 로그 관측**으로 단순화. ⚠️ criteo는 device_type/os/country가 정상 NULL이라 검사 대상에서 제외(공통 키만 null 검사) — 안 그러면 criteo 273만 행이 통째로 걸러진다.
 
 [질문] 이러한 문제도 실무에선 PM이나 경영진의 정책 결정으로 판단하게 되는 것인지?
 

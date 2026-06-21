@@ -224,8 +224,10 @@ def run() -> None:
 
     interval = 1.0 / config.DUMMY_EPS
     auction_count = 0
+    max_auctions = config.DUMMY_MAX_AUCTIONS
 
     print(f"[INFO] 더미 생성기 시작 | EPS={config.DUMMY_EPS} | DRY_RUN={DRY_RUN}")
+    print(f"[INFO] MAX_AUCTIONS={'무제한' if max_auctions <= 0 else f'{max_auctions:,}건 후 종료'}")
 
     try:
         while True:
@@ -284,6 +286,10 @@ def run() -> None:
             # 10,000건마다 진행 상황 출력
             if auction_count % 10_000 == 0:
                 print(f"[INFO] auction {auction_count:,}건 처리 완료")
+
+            if max_auctions > 0 and auction_count >= max_auctions:
+                print(f"[INFO] MAX_AUCTIONS({max_auctions:,}) 도달 — 생성 중단.")
+                break
 
             time.sleep(interval)
 

@@ -151,8 +151,10 @@ def run() -> None:
     row_count = 0
     total_events = 0
 
+    max_rows = config.CRITEO_MAX_ROWS
     print(f"[INFO] 재생 시작 | DRY_RUN={DRY_RUN} | REPLAY_INTERVAL={config.CRITEO_REPLAY_INTERVAL}s")
     print(f"[INFO] click 1건당: request×{config.REQUESTS_PER_CLICK} + impression×{config.IMPRESSIONS_PER_CLICK} + click×1 (+ conversion 조건부)")
+    print(f"[INFO] MAX_ROWS={'무제한' if max_rows <= 0 else f'{max_rows:,}행 후 종료'}")
 
     try:
         for row in dataset:
@@ -183,6 +185,10 @@ def run() -> None:
 
             if row_count % 10_000 == 0:
                 print(f"[INFO] {row_count:,}행 처리 완료 | 총 이벤트 약 {total_events:,}건 발행")
+
+            if max_rows > 0 and row_count >= max_rows:
+                print(f"[INFO] MAX_ROWS({max_rows:,}) 도달 — 재생 중단.")
+                break
 
             if config.CRITEO_REPLAY_INTERVAL > 0:
                 time.sleep(config.CRITEO_REPLAY_INTERVAL)

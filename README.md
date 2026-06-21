@@ -95,6 +95,17 @@ Silver Airflow를 LocalExecutor로 구성 → scheduler가 스케줄링(두뇌)�
 
 [TODO/리팩토링] 로컬에서 처리량 증가는 안 되지만, **worker 수를 늘릴 수 있는 구조를 미리 짜두자**(예: docker compose `--scale spark-worker=N` 또는 worker 서비스 복제 가능하게). 처리량 목적이 아니라 멀티 worker 분산·등록·일 분배 동작을 검증하고, EKS/매니지드 전환 시 노드만 늘리면 되도록 리허설하는 목적. 추후 refactor 단계에서 반영.
 
+> 11. 재수집용 producer 설정(MAX_ROWS / MAX_AUCTIONS / restart 정책)의 상용 함의
+
+**왜 추가했나**: criteo 시뮬레이터가 유한 데이터셋을 무제한 시간 재생하면 수천만 행으로 폭주해 Silver 전량 적재 시 OOM이 났다. 그래서 원천 데이터를 0부터 지우고 **적정량만 재수집**하기로 했고(약 277만 이벤트), 양을 결정적으로 제어하려고 `CRITEO_MAX_ROWS`/`DUMMY_MAX_AUCTIONS`(상한 도달 시 producer 자동 종료) + `restart: on-failure`를 도입했다. 목적은 Gold 대시보드용 깨끗한 데이터 확보.
+
+**상용에서 걸림돌이 되는가** — 기본값이 안전(`0=무제한`)이라 켜지 않으면 상용 동작 그대로다. 다만 둘 다 본질적으로 "시뮬레이터라서 생긴" 설정이다:
+
+- `CRITEO_MAX_ROWS` / `DUMMY_MAX_AUCTIONS`: 애초에 producer가 유한 데이터셋을 재생하는 **시뮬레이터**라 존재하는 knob. 상용에선 producer가 실제 광고 SDK·실시간 이벤트 소스로 대체되며 "최대 행 수" 개념 자체가 사라진다(`CRITEO_REPLAY_INTERVAL`도 동일한 시뮬레이션 throttle). → 상용 전환 시 **제거**되는 개발 전용 설정. 기본 0이라 그대로 둬도 상용 동작은 안 깨짐.
+- `restart: always` → `on-failure`: **유일하게 상용 표준에서 벗어난 실제 변경.** 상한 도달 정상 종료(exit 0)를 Docker가 재시작해 재생을 무한 반복하는 걸 막으려 바꿨다. 그런데 24/7 상시 서비스는 보통 `always`/`unless-stopped`가 표준(데몬·호스트 재부팅, 정상 종료에도 자동 복구). `on-failure`도 크래시(비정상 종료) 복구는 되지만 재부팅 자동 기동은 안 된다. → 상용 전환 시 **`unless-stopped`로 환원**해야 한다.
+
+→ **상용 전환 체크리스트**: ① producer를 실제 이벤트 소스로 교체하며 MAX_ROWS/MAX_AUCTIONS/REPLAY_INTERVAL 제거, ② producer `restart` 정책을 `unless-stopped`로 환원. 정리하면 이 설정들은 "조용히 깨지진 않지만 상용으로 그대로 들고 가면 안 되는" 로컬·시뮬레이션 전용 장치다.
+
 # 광고 이벤트 레이크하우스
 
 ## 1. 도메인 정의 + 핵심 KPI 3개

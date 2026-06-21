@@ -437,10 +437,66 @@ WHERE event_date = current_date;
 
 ## 11. 장애 대응 시나리오
 
-### 새벽 OOM 장애
+### 11-1. 새벽 Spark Streaming OOM 장애
 
-### 정제 로직 버그 발견 (백필)
+**상황**: Bronze 스트리밍 잡이 새벽에 OOM(`code 137`)으로 죽음.
 
+**복구 메커니즘**:
+- **offset 복구**: `checkpointLocation`(s3a://.../checkpoints/bronze)에 마지막으로 처리한
+  Kafka offset이 durable하게 남아 있다. 잡 재시작 시 그 지점부터 정확히 이어 읽는다
+  (at-least-once). → [bronze_stream.py](../code/pipelines/bronze_stream.py)의 `checkpointLocation`.
+- **중복 방지**: 재시작 과정에서 일부 메시지가 재처리돼 Bronze에 중복 append될 수 있다.
+  하지만 Silver가 `event_id` 기준 dedup(ROW_NUMBER latest wins) + MERGE INTO upsert로
+  멱등하게 흡수한다. → Bronze는 중복을 "막지" 않고 Silver가 "걸러낸다".
+- **메모리 안전벨트**: `maxOffsetsPerTrigger`로 배치당 소비량을 제한해 백로그를 한 번에
+  읽다 OOM 나는 것을 방지. 진짜 해결은 EKS executor 오토스케일(KEDA, README 고민 4).
+- **raw zone 재처리**: 최악의 경우에도 이미 Bronze(S3)에 적재된 raw는 안전하므로,
+  Silver를 raw에서 언제든 재생성할 수 있다.
+
+> ⚠️ 한계(실제 겪음, README 고민 5): Kafka 볼륨 자체가 유실되면 체크포인트가 가리키는
+> offset과 Kafka의 실제 offset이 불일치(`failOnDataLoss`)해 미소비 백로그가 영구 손실된다.
+> Bronze에 이미 들어온 데이터는 안전. 복구는 체크포인트 리셋 후 현재 Kafka부터 재개.
+
+### 11-2. 정제 로직 버그 발견 → 3개월치 백필
+
+**상황**: Silver 정제 로직에 버그가 있었음을 발견, 과거 3개월치를 다시 처리해야 함.
+
+**대응**:
+- **raw 보존이 전제**: Bronze는 변환 없는 raw를 영구 보존하므로 원천이 살아 있다.
+  버그 고친 Silver 잡을 `--window-days 90`(또는 기간 지정)으로 재실행하면 된다.
+- **MERGE 멱등성**: `event_id` 기준 upsert라 백필이 기존 행을 덮어쓸 뿐 중복을 만들지 않는다.
+  몇 번을 돌려도 결과가 같다(WHEN MATCHED UPDATE / NOT MATCHED INSERT).
+- **백필 중 대시보드 일관성**: Iceberg는 스냅샷 격리(snapshot isolation)를 제공한다.
+  백필 MERGE가 진행 중이어도 대시보드(Athena)는 마지막으로 **커밋된 스냅샷**만 읽으므로
+  중간 상태가 노출되지 않는다. 커밋 순간 원자적으로 새 스냅샷으로 전환된다.
+- **Expire/Orphan 정책이 백필을 막지 않는가**: 막지 않는다. 백필은 **time-travel이 아니라
+  Bronze raw 재처리 + Silver MERGE**로 하므로 Silver 스냅샷 보존기간(retain 7d)과 무관하다.
+  단 "Silver를 과거 시점으로 time-travel해서 비교"하려면 그만큼 스냅샷 보존이 필요
+  → `iceberg_maintenance.py --snapshot-retention-days`를 백필 윈도우보다 길게 잡으면 된다.
+  Bronze raw는 expire가 데이터를 지우는 게 아니라 **구 스냅샷 메타**만 지우므로, 현재
+  스냅샷이 가리키는 raw 데이터는 항상 안전하다.
+
+### 11-3. 컴팩션 도중 streaming/batch MERGE가 같은 파티션을 건드림 (OCC)
+
+**상황**: `iceberg_maintenance`의 `rewrite_data_files`(컴팩션)가 도는 동안, Bronze 스트리밍
+append나 Silver MERGE가 같은 파티션을 커밋함.
+
+**Iceberg의 감지·중재 (낙관적 동시성, OCC)**:
+- 컴팩션은 시작 시점의 스냅샷을 base로 새 데이터 파일을 만든다. commit 시 Iceberg는
+  base 스냅샷이 그새 바뀌었는지 검증한다 → 바뀌었으면(다른 write가 먼저 커밋) **충돌을
+  감지하고 컴팩션 commit을 실패**시킨다(데이터 손상 없이). 즉 "둘 다 조용히 덮어쓰기"가
+  일어나지 않는다.
+
+**운영 회피 패턴 (이 프로젝트 적용)**:
+- **시간대 분리**: `iceberg_maintenance` DAG는 `0 4 * * *`(04:00), `silver_processed`는
+  `@daily`(자정 기준)으로 스케줄을 분리해 배치 MERGE와 컴팩션이 겹치지 않게 했다.
+- **`partial-progress.enabled=true`**: 컴팩션을 여러 commit으로 쪼개, 충돌이 난 파일 그룹만
+  실패시키고 나머지는 부분 커밋한다. 실패분은 다음 run에서 처리 → 전체 실패가 아닌 점진 진행.
+- **Bronze 스트리밍(상시 write)**: 시간대 분리가 불가하므로 partial-progress에 의존하고,
+  `remove_orphan_files`는 `older_than`(72h)으로 in-flight 파일을 보호한다.
+
+> 참고: 더 강한 격리가 필요하면 컴팩션 직전 스트리밍을 잠깐 멈췄다 재개하는 패턴도 있으나,
+> 본 프로젝트는 OCC + 시간대 분리 + partial-progress로 충분하다고 판단.
 
 ---
 

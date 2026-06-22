@@ -334,17 +334,28 @@ def enrich_conversion_delay(spark: SparkSession, events: DataFrame) -> DataFrame
 # ── 5. MERGE INTO ────────────────────────────────────────────────────────────
 
 def merge_into(spark: SparkSession, final_df: DataFrame) -> None:
-    """event_id 기준 upsert. 멱등 재실행 + 지연 전환 반영 (COW)."""
+    """event_id 기준 upsert. 멱등 재실행 + 지연 전환 반영 (COW).
+
+    조건부 UPDATE: 비즈니스 컬럼이 실제로 다를 때만 UPDATE 한다(그때만 updated_at 갱신).
+    왜? sliding window가 매일 같은 행을 다시 읽어오는데, 무조건 UPDATE SET * 하면 안 바뀐
+    행도 updated_at이 매일 갱신되고, Gold(updated_at 증분)가 안 바뀐 파티션도 매일 재집계한다.
+    null-safe 비교(<=>)로 criteo의 정상 NULL(device/os/country)도 안전하게 다룬다.
+    (README 고민 14 참고)
+    """
     final_df.withColumn("updated_at", F.current_timestamp()) \
         .select(*FINAL_COLS) \
         .createOrReplaceTempView("silver_source")
+
+    # 비교 대상 = 키(event_id)와 메타(updated_at)를 뺀 비즈니스 컬럼.
+    compare_cols = [c for c in FINAL_COLS if c not in ("event_id", "updated_at")]
+    unchanged = " AND ".join(f"t.{c} <=> s.{c}" for c in compare_cols)
 
     spark.sql(
         f"""
         MERGE INTO {TARGET} t
         USING silver_source s
         ON t.event_id = s.event_id
-        WHEN MATCHED THEN UPDATE SET *
+        WHEN MATCHED AND NOT ({unchanged}) THEN UPDATE SET *
         WHEN NOT MATCHED THEN INSERT *
         """
     )

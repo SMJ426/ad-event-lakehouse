@@ -177,6 +177,17 @@ WHEN MATCHED AND NOT (t.col1 <=> s.col1 AND t.col2 <=> s.col2 AND ...) THEN UPDA
 
 ## 6. 대시보드 (스크린샷 + 운영 메트릭)
 
+**스택**: `Superset(BI) → Trino(쿼리엔진) → Glue Catalog + Iceberg → S3`. Spark가 write, Trino가 read.
+(강의 7회차 p.26 "팀 BI" 권장 조합 = Spark + Iceberg + Trino + Superset.)
+
+**실행**: `docker compose -f infra/docker-compose.dashboard.yaml up -d --build` → Superset http://localhost:8088 (admin/admin). Trino DB "Iceberg (Trino)" 사전 등록됨. 상세·차트 쿼리는 [dashboard/](dashboard/README.md) 참고.
+
+**두 탭 구성** (평가 필수 — 비즈니스 KPI + 운영 메트릭):
+- **비즈니스 KPI 탭** (Gold): 전체 CTR/CVR/ROAS 빅넘버, 캠페인 성과 Top, 시간대 퍼널(hourly_funnel), 소재 CTR.
+- **운영 메트릭 탭** (평가기준 ① 운영 가시성): 신선도(updated_at/최신 스냅샷), 일자별 행 수, 중복 event_id, **파일 수·평균 크기**(`$files`), 스냅샷 수(`$snapshots`) — Iceberg 메타테이블을 Trino로 조회.
+
+> **Gold KPI 날짜 기준**(강의 p.16 필수): 각 이벤트 **발생일(event_date) 기준** 집계(attribution 미적용). cost=click 합(CPC), ROAS=전환수×가정단가($10)/cost. (상세 [dashboard/README.md](dashboard/README.md))
+
 ## 7. 100x 스케일 아웃 시나리오 (설계만, 구현 X)
 
 ## 8. 장애·운영 시나리오

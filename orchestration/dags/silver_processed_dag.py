@@ -1,15 +1,17 @@
 """
-silver_processed_dag.py — Silver processed_events 적재 DAG
+silver_processed_dag.py — Silver 적재 + Gold 집계 DAG
 
-Bronze raw → Silver processed_events 배치 잡(code/pipelines/silver_processed.py)을
-Airflow가 매일(@daily) Spark standalone 클러스터에 제출해 실행한다.
+Bronze raw → Silver processed_events(MERGE) → Gold KPI 집계를 Airflow가 매일(@daily)
+Spark standalone 클러스터에 제출해 실행한다.
 
 구조:
   Airflow(SparkSubmitOperator) → spark://spark-master:7077 (client 모드)
-    → 드라이버는 Airflow 컨테이너, executor는 spark-worker가 실행
-    → Bronze(S3) 읽고 → Silver MERGE INTO (멱등)
+    silver_processed_merge : Bronze(S3) 읽고 → Silver MERGE INTO (멱등)
+        ↓ (Silver 성공 후에만)
+    gold_aggregate         : Silver → Gold KPI 집계 (updated_at 기반 증분)
 
-잡 자체는 수정 없음. 동일 인자(--window-days)로 호출만 한다.
+Gold는 Silver 하류에 둬서 불완전한 Silver로 KPI를 오산하지 않게 한다
+(architecture "Silver 완료 후 즉시"와 일치).
 """
 
 from datetime import datetime, timedelta
@@ -59,3 +61,19 @@ with DAG(
         },
         verbose=False,
     )
+
+    # Silver 성공 후 Gold KPI 집계 (updated_at 기반 증분 — 변경된 event_date 파티션만 재계산)
+    gold_aggregate = SparkSubmitOperator(
+        task_id="gold_aggregate",
+        conn_id="spark_default",
+        application="/opt/spark/work-dir/gold_aggregations.py",
+        application_args=["--lookback-days", "3"],
+        jars=SPARK_JARS,
+        conf={
+            "spark.driver.memory": "2g",
+            "spark.executor.memory": "4g",
+        },
+        verbose=False,
+    )
+
+    silver_merge >> gold_aggregate

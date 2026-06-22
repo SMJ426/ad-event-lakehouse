@@ -285,30 +285,36 @@ s3://bucket/silver/
 
 | 항목 | 내용 |
 |------|------|
-| 처리 방식 | AWS Glue ETL (Spark Batch) |
-| 스케줄 | Silver 완료 후 즉시 (Airflow) |
+| 처리 방식 | Spark Batch (gold_aggregations.py) |
+| 스케줄 | Silver 완료 후 즉시 (silver DAG 하류: `silver_processed_merge >> gold_aggregate`) |
+| 처리 방식 | **증분** — updated_at(Silver 처리시각) 기준 변경된 event_date 파티션만 overwritePartitions |
 
-**Gold 테이블 목록:**
+**대시보드 계약 (Gold는 이 매핑에 맞춰 설계 — 소비자 역방향):**
 
-**① campaign_daily_stats** — 캠페인별 일별 성과
+| Gold 테이블 | 대시보드 뷰 | 주 데이터원 |
+|---|---|---|
+| `campaign_daily_stats` | 캠페인 성과(CTR/CVR/CPA/ROAS, 일별 추세) | dummy(날짜 누적) |
+| `banner_daily_stats` | 소재 성과(CTR, peak_hour) | 공통 |
+| `hourly_funnel` | 시간대 퍼널/분포(24h fill→CTR→CVR) | criteo(하루치 24h) |
+
+**집계 설계 메모:**
+- **cost = SUM(cost) FILTER(event_type='click')** — criteo는 click+conversion, dummy는 전 이벤트가
+  cost를 가져 단순 SUM 시 중복/폭증. CPC 모델로 통일. (검증: Gold cost == Silver click cost 합)
+- **ROAS** = conversions × `REVENUE_PER_CONVERSION`(가정 단가, 기본 10.0) / cost. 매출 데이터 없어 가정.
+- **증분 키 = updated_at**: event_date(이벤트 발생시각)로 윈도우 잡으면 criteo(2024) 누락 →
+  처리시각(updated_at)으로 최근 변경분의 event_date를 잡아 그 파티션만 재계산.
+
+**Gold 테이블 (구현: gold_tables.sql / gold_aggregations.py):**
+
+**① campaign_daily_stats** (campaign_id × event_date)
 ```
-campaign_id | dt         | request | impression | click | conversion | CTR  | CVR  | fill_rate | cost
-CAMP_042    | 2024-01-15 | 50,000  | 40,000     | 1,000 | 50         | 2.5% | 5.0% | 80%       | $450
+campaign_id | event_date | requests | impressions | clicks | conversions | fill_rate | ctr | cvr | cost | cpa | roas
+10341182    | 2024-01-01 | 3,496,000| 87,400      | 2,185  | 188         | 0.8       |0.025|0.086| 594  |3.16 | 3.16
 ```
 
-**② banner_daily_stats** — 배너별 일별 성과
-```
-banner_id     | dt         | impression | click | CTR  | peak_hour
-CAMP_042_A_X  | 2024-01-15 | 22,000     | 594   | 2.7% | 14
-```
+**② banner_daily_stats** (banner_id × event_date) — impressions, clicks, ctr, peak_hour, cost
 
-**③ hourly_funnel** — 시간대별 퍼널
-```
-dt         | hour | request | impression | click | conversion | fill_rate | CTR  | CVR
-2024-01-15 | 10   | 8,000   | 6,400      | 160   | 8          | 80%       | 2.5% | 5%
-```
-
-더 추가 예정
+**③ hourly_funnel** (event_date × hour) — requests, impressions, clicks, conversions, fill_rate, ctr, cvr
 
 ---
 

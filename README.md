@@ -121,6 +121,44 @@ Small File 문제(Bronze 60초 마이크로배치가 테이블당 작은 parquet
 - `remove_orphan_files`는 `older_than < 24h`를 **Iceberg가 차단**한다(동시 작업 중 in-flight 파일 손상 방지). → 잡에서 24h 미만은 24h로 클램프 + 경고.
 - orphan은 테이블 위치(`s3://`)를 **Hadoop FileSystem으로 직접 리스팅**하는데, 적재 잡은 `s3a` 체크포인트만 써서 클러스터에 `hadoop-aws`가 없었고 `s3` 스킴 매핑도 없었다. → `fs.s3.impl=S3AFileSystem` 설정 + `hadoop-aws`/`aws-java-sdk-bundle` jar를 `--jars`에 추가(S3FileIO만 쓰는 compaction/expire와 달리 orphan만의 추가 의존성).
 
+> 13. Gold 레이어 — 대시보드 계약, cost 정의, 증분 처리
+
+Gold(`gold_aggregations.py`)는 Silver(이벤트 단위)를 KPI로 집계한 서빙용 3테이블(campaign_daily_stats / banner_daily_stats / hourly_funnel)이다. silver DAG 하류(`silver_processed_merge >> gold_aggregate`)로 자동 실행. 실측: campaign 669 / banner 4006 / hourly 7행.
+
+**설계 결정 3가지**:
+- **대시보드에서 거꾸로 설계**: "Gold를 잘 만들려면 대시보드를 먼저 정해야 하나?" → 그렇다. 각 Gold 테이블이 어떤 대시보드 뷰를 서빙하는지 매핑(계약)을 먼저 고정하고 그에 맞춰 만들었다. criteo는 한 날에 몰려 **시간대 분포(hourly_funnel)**, dummy는 매일 누적되니 **일별 추세(campaign_daily)** — 데이터원을 강점에 맞게 분담.
+- **cost = `SUM(cost) FILTER(event_type='click')`**: criteo는 click+conversion, dummy는 전 이벤트가 cost를 가져 단순 SUM 시 중복/폭증한다. CPC 모델로 통일. (검증: Gold cost 7858.04 == Silver click cost 7858.04로 일치) ROAS는 매출이 없어 전환당 가정 단가(상수)로 계산.
+- **증분 = updated_at 기준 (event_date 아님)**: "지금은 작은 데이터지만 실제론 날짜별로 누적된다"는 점을 반영해 전량 재계산이 아니라 증분으로 설계. 그런데 event_date(이벤트 발생시각)로 윈도우를 잡으면 criteo(2024)가 누락된다 → **updated_at(Silver 처리시각)으로 최근 변경분의 event_date를 골라** 그 파티션만 `overwritePartitions`. late data도 자동 반영, 매일 바뀐 날짜만 갱신.
+
+**검증으로 잡은 것**: 퍼널 단조성(req≥imp≥click≥conv) 위반 0, 비율 범위(0~1) 위반 0, hourly_funnel에서 criteo가 fill 0.8·ctr 0.025로 **합성 비율(80%·2.5%) 그대로** 재현됨을 확인. (그리고 "dummy 캠페인 50개"가 버그인 줄 알았으나 풀이 실제 50개여서 정상 — 출력을 직접 보고 가정을 검증한 사례)
+
+> 14. Silver MERGE를 조건부로 — sliding window × 무조건 UPDATE의 증분 낭비
+
+**발견한 문제**: Silver는 매일 7일 sliding window로 Bronze를 다시 읽어 MERGE한다. 그런데 기존 MERGE가 `WHEN MATCHED THEN UPDATE SET *`(무조건 UPDATE)라서, **내용이 안 바뀐 행도 매일 `updated_at`이 갱신**됐다. 그러면 Gold(고민 13, `updated_at` 기준 증분)가 **실제로 안 바뀐 파티션도 매일 재집계**한다. 특히 우리 데이터는 criteo 273만 행이 최근 dt라 매일 재-MERGE → 2024-01-01 파티션 전체를 매일 헛계산. **틀리진 않지만(멱등) 낭비**다.
+
+**해결**: MERGE를 조건부로 — *비즈니스 컬럼이 실제로 다를 때만* UPDATE.
+```sql
+WHEN MATCHED AND NOT (t.col1 <=> s.col1 AND t.col2 <=> s.col2 AND ...) THEN UPDATE SET *
+```
+- `<=>`(null-safe 동등)을 써서 criteo의 정상 NULL(device/os/country)도 안전 비교(`<>`는 NULL이면 변경을 놓침).
+- 비교 대상 = `FINAL_COLS` − {event_id(키), updated_at(메타)}.
+- 효과: 안 바뀐 행은 UPDATE 스킵 → `updated_at` 유지 → Gold가 그 날짜를 "안 바뀐 날"로 보고 건너뜀 → **증분이 진짜 증분이 됨**. (검증: Silver 재실행해도 max(updated_at)이 14:03:37로 불변)
+
+**검증으로 잡은 중요한 한계 (COW의 성질)**: 조건부로 바꿔도 **Iceberg COW MERGE는 ON 조건(event_id)에 매칭되는 데이터 파일을 통째로 다시 쓴다.** 7일 윈도우 source가 모든 event_id를 덮으니 매 실행마다 매칭 파일 전부가 rewrite된다(스냅샷: overwrite, added=deleted=전체 행수). 단 `WHEN MATCHED AND NOT(...)`이 false라 **행은 옛 값(옛 updated_at) 그대로 되써질 뿐**이다.
+→ 즉 이 변경은 **"updated_at 보존(= Gold 증분 정상화)"이 목적이고 그건 달성**했지만, **파일 rewrite(=compaction/스토리지 churn)는 줄지 않는다.** 파일 churn까지 없애려면 MERGE source를 실제 신규/변경분으로 좁히거나(anti-join), MOR(merge-on-read)로 전환해야 함 — 별도 과제. 처음엔 "compaction 부담도 준다"고 적었으나 스냅샷을 보고 정정(출력 검증으로 잡은 오판).
+
+**남은 트레이드오프**: late-arriving 전환(conversion_delay_sec 변경)은 비교 대상에 포함돼 정상 반영. sliding window 자체(7일 재읽기)는 늦게 오는 데이터 대비로 유지. 윈도우 폭/Gold lookback은 별도 튜닝 레버.
+
+> 15. cost 모델링의 모호함 — bid_price를 cost로 매핑한 것
+
+**의문**: Gold에서 광고비를 집계하다 보니 `cost`가 모든 이벤트(request/impression/click/conversion) 행에 같은 값으로 들어있었다. 왜?
+
+**원인**: `bid_price`(낙찰가)는 원래 **경매(auction) 단위 속성**이다. 그런데 dummy producer(`_make_event`)가 한 경매의 맥락(bid_price 등)을 그 경매에서 파생된 **모든 이벤트 행에 복사**해 넣는다(각 이벤트가 자기완결로 맥락을 들고 다님 — raw 이벤트 로그에선 정상). 그리고 Silver가 `bid_price → cost`로 이름을 바꾸면서, "cost(비용)"라는 이름 탓에 **모든 이벤트가 광고주 비용인 것처럼 보였다.** 실제로는 같은 경매 가격의 반복일 뿐, 4번 과금이 아니다.
+
+**반영(해결)**: 실제 과금은 **과금 모델이 정하는 한 시점**에만 일어난다. 본 프로젝트는 **CPC(Cost Per Click, 클릭당 과금)** 로 가정 → Gold cost = `SUM(cost) FILTER(event_type='click')` 로 **click 행의 cost만** 합산해 중복 합산을 피한다(고민 13 / `_click_cost`). 검증: Gold cost == Silver click cost 합(7858.04)으로 일치.
+
+**남은 개선점**: "경매 가격(bid_price)"과 "실제 과금액(cost)"을 별도 컬럼으로 구분하거나, 과금 이벤트(click)에만 cost를 두면 모델이 더 명확해진다. 현재는 bid_price를 cost로 복사 + Gold에서 click만 합산해 **결과는 맞게** 처리. (지금은 CPC 단일 가정 — 모델이 섞이면 과금 모델 필드를 두고 모델별 과금 이벤트를 골라 합산하도록 확장)
+
 # 광고 이벤트 레이크하우스
 
 ## 1. 도메인 정의 + 핵심 KPI 3개

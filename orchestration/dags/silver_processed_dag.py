@@ -5,13 +5,13 @@ Bronze raw → Silver processed_events(MERGE) → Gold KPI 집계를 Airflow가 
 Spark standalone 클러스터에 제출해 실행한다.
 
 구조:
-  Airflow(SparkSubmitOperator) → spark://spark-master:7077 (client 모드)
-    silver_processed_merge : Bronze(S3) 읽고 → Silver MERGE INTO (멱등)
-        ↓ (Silver 성공 후에만)
-    gold_aggregate         : Silver → Gold KPI 집계 (updated_at 기반 증분)
+  silver_processed_merge >> gold_aggregate >> compact_gold   (데이터 경로 + gold 압축)
+  silver_processed_merge >> compact_silver                   (silver 압축, 분기 trailing)
 
-Gold는 Silver 하류에 둬서 불완전한 Silver로 KPI를 오산하지 않게 한다
-(architecture "Silver 완료 후 즉시"와 일치).
+  - compaction을 쓰기 직후 인라인(silver/gold) — write-driven이라 여기가 맞음.
+    (expire/orphan 같은 time-driven GC는 별도 iceberg_maintenance DAG에서 주기로.)
+  - compaction은 데이터 경로(silver>>gold)에서 분기한 trailing이라, 압축 실패가
+    gold/데이터를 막지 않는다. compact_silver는 silver_merge 끝난 뒤라 동시 writer 없음(OCC 없음).
 """
 
 from datetime import datetime, timedelta
@@ -58,6 +58,9 @@ with DAG(
         conf={
             "spark.driver.memory": "2g",
             "spark.executor.memory": "4g",
+            # OOM 안전벨트(단일 worker): 동시 task 줄이고(cores↓) 셔플 파티션 잘게(메모리 분산)
+            "spark.executor.cores": "2",
+            "spark.sql.shuffle.partitions": "400",
         },
         verbose=False,
     )
@@ -76,4 +79,23 @@ with DAG(
         verbose=False,
     )
 
-    silver_merge >> gold_aggregate
+    # ── 인라인 compaction (write-driven) — 쓰기 직후 그 레이어만 압축 ──────────────
+    # 로직은 iceberg_maintenance.py 단일 모듈, DAG는 cadence(언제)만 wiring.
+    # compact는 S3FileIO라 hadoop-aws 불필요 → 기존 SPARK_JARS로 충분.
+    def _compact(task_id: str, layer: str) -> SparkSubmitOperator:
+        return SparkSubmitOperator(
+            task_id=task_id,
+            conn_id="spark_default",
+            application="/opt/spark/work-dir/iceberg_maintenance.py",
+            application_args=["--layer", layer, "--ops", "compact"],
+            jars=SPARK_JARS,
+            conf={"spark.driver.memory": "2g", "spark.executor.memory": "4g"},
+            verbose=False,
+        )
+
+    compact_silver = _compact("compact_silver", "silver")
+    compact_gold = _compact("compact_gold", "gold")
+
+    # 데이터 경로(silver>>gold)는 그대로, compaction은 분기 trailing(non-blocking).
+    silver_merge >> gold_aggregate >> compact_gold
+    silver_merge >> compact_silver

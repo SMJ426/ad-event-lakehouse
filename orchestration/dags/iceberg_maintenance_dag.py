@@ -1,18 +1,19 @@
 """
-iceberg_maintenance_dag.py — Iceberg 테이블 유지보수 자동화 DAG
+iceberg_maintenance_dag.py — Iceberg 주기 GC DAG (time-driven 유지보수)
 
-Bronze·Silver Iceberg 테이블의 유지보수 잡(code/pipelines/iceberg_maintenance.py)을
-Airflow가 매일 Spark standalone 클러스터에 제출해 실행한다.
+유지보수를 cadence별로 분리한 뒤, 이 DAG는 **time-driven 청소만** 담당한다:
+  - compact_bronze : Bronze compaction (streaming이라 '쓰기 끝' 시점이 없어 인라인 불가 → 주기로)
+  - expire         : 오래된 스냅샷 제거 (전 레이어 bronze+silver+gold)
+  - orphan         : 고아 파일 제거 (전 레이어)
 
-구조:
-  Airflow(SparkSubmitOperator) → spark://spark-master:7077 (client 모드)
-    → compact >> expire >> orphan 순서로 실행
-    → Bronze 4테이블 + Silver 1테이블의 small file·구 스냅샷·고아 파일 정리
+  → compact_bronze >> expire >> orphan
 
-스케줄/시간대 분리:
-  silver_processed(@daily, 자정 기준)와 다른 시각(04:00)에 돌려, Silver 배치 MERGE와
-  같은 파티션을 동시에 건드리는 상황(OCC 충돌)을 줄인다. Bronze 스트리밍은 상시 쓰므로
-  compaction은 partial-progress, orphan은 older_than으로 안전 처리한다(잡 내부 정책).
+silver/gold의 compaction(write-driven)은 여기가 아니라 메달리온 DAG(silver_processed)에
+**쓰기 직후 인라인**으로 들어가 있다. (연산 로직은 iceberg_maintenance.py 단일 모듈, DAG는 cadence만 wiring)
+
+스케줄:
+  매일 04:00. expire/orphan은 시간 기반이라 일 1회로 충분(매번 돌리면 헛바퀴, orphan은 매번 전체 LIST).
+  Bronze compaction은 24/7 streaming과 동시라 시간대 분리가 무의미 → partial-progress로 OCC 처리.
 """
 
 from datetime import datetime, timedelta
@@ -41,13 +42,13 @@ default_args = {
 }
 
 
-def _op(task_id: str, op: str) -> SparkSubmitOperator:
-    """단일 유지보수 연산(op)을 전체 레이어에 실행하는 태스크 생성."""
+def _op(task_id: str, layer: str, op: str) -> SparkSubmitOperator:
+    """지정 레이어에 단일 유지보수 연산(op)을 실행하는 태스크 생성."""
     return SparkSubmitOperator(
         task_id=task_id,
         conn_id="spark_default",                       # spark://spark-master:7077
         application=APP,                               # 마운트된 최신 코드
-        application_args=["--layer", "{{ params.layer }}", "--ops", op],
+        application_args=["--layer", layer, "--ops", op],
         jars=SPARK_JARS,
         conf=SPARK_CONF,
         verbose=False,
@@ -56,20 +57,18 @@ def _op(task_id: str, op: str) -> SparkSubmitOperator:
 
 with DAG(
     dag_id="iceberg_maintenance",
-    description="Iceberg compaction / expire_snapshots / remove_orphan_files 자동화",
-    schedule="0 4 * * *",     # 매일 04:00 — silver_processed(자정)와 시간대 분리
+    description="Iceberg 주기 GC — bronze compaction + expire/orphan(전 레이어)",
+    schedule="0 4 * * *",     # 매일 04:00. time-driven GC는 일 1회로 충분
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,        # 동시 실행 금지 (jar/리소스/OCC 충돌 방지)
     default_args=default_args,
-    tags=["maintenance", "iceberg"],
-    # 트리거 시 조절 가능. 기본 = 전체 레이어(bronze+silver).
-    params={"layer": "all"},
+    tags=["maintenance", "iceberg", "gc"],
 ) as dag:
 
-    # 순서 보장: compaction(새 스냅샷 생성) → expire(구 스냅샷 제거) → orphan(고아 파일 회수)
-    compact = _op("compact", "compact")
-    expire = _op("expire", "expire")
-    orphan = _op("orphan", "orphan")
+    # 순서: bronze 압축(새 스냅샷) → expire(구 스냅샷 제거) → orphan(고아 파일 회수)
+    compact_bronze = _op("compact_bronze", "bronze", "compact")   # streaming이라 주기로
+    expire = _op("expire", "all", "expire")                       # 전 레이어(bronze+silver+gold)
+    orphan = _op("orphan", "all", "orphan")
 
-    compact >> expire >> orphan
+    compact_bronze >> expire >> orphan

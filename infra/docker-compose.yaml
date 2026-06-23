@@ -147,7 +147,7 @@ services:
     environment:
       S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정 — infra/.env에 S3_BUCKET=... 기록하거나 export 필요}
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      AWS_REGION: ap-northeast-2
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
       AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials   # AWS SDK v2 (Iceberg S3FileIO)
       AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials  # AWS SDK v1 (hadoop-aws s3a)
       AWS_CONFIG_FILE: /opt/spark/.aws/config

@@ -21,19 +21,11 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 
-# 이미 캐시된 Iceberg + AWS jar를 직접 지정 (--packages 런타임 다운로드 회피).
-# silver_processed_dag와 동일하게 infra_ivy-cache 볼륨(/opt/cache)을 사용.
-# hadoop-aws + aws-java-sdk-bundle은 remove_orphan_files가 s3:// 위치를 Hadoop
-# FileSystem(S3A)으로 리스팅하는 데 필요하다 (적재 잡엔 불필요했던 추가 의존성).
-SPARK_JARS = (
-    "/opt/cache/jars/org.apache.iceberg_iceberg-spark-runtime-3.5_2.12-1.11.0.jar,"
-    "/opt/cache/jars/org.apache.iceberg_iceberg-aws-bundle-1.11.0.jar,"
-    "/opt/cache/jars/org.apache.hadoop_hadoop-aws-3.3.4.jar,"
-    "/opt/cache/jars/com.amazonaws_aws-java-sdk-bundle-1.12.262.jar"
-)
+# 공통 jar/conf (spark_defaults). 유지보수는 remove_orphan_files가 s3:// 위치를 Hadoop
+# FileSystem(S3A)으로 리스팅하므로 hadoop-aws 포함 변형을 쓴다.
+from spark_defaults import ICEBERG_JARS_WITH_HADOOP as SPARK_JARS, SPARK_CONF
 
 APP = "/opt/spark/work-dir/iceberg_maintenance.py"
-SPARK_CONF = {"spark.driver.memory": "2g", "spark.executor.memory": "4g"}
 
 default_args = {
     "owner": "data-eng",

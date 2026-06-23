@@ -17,7 +17,7 @@ name: silver-airflow   # 별도 프로젝트명 (Bronze 스택과 분리)
 
 x-spark-env: &spark-env
   S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정 — infra/.env에 기록 필요}
-  AWS_REGION: ap-northeast-2
+  AWS_REGION: ${AWS_REGION:-ap-northeast-2}
   AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials   # SDK v2 (Iceberg S3FileIO)
   AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials  # SDK v1
   AWS_CONFIG_FILE: /opt/spark/.aws/config
@@ -96,7 +96,7 @@ services:
       AIRFLOW__WEBSERVER__SECRET_KEY: "ad-lakehouse-silver-airflow-secret-key-fixed"
       # silver 잡(드라이버)이 쓸 값
       S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정}
-      AWS_REGION: ap-northeast-2
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
       AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials
       AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials
       AWS_CONFIG_FILE: /opt/spark/.aws/config

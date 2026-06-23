@@ -23,11 +23,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 
-# 이미 캐시된 Iceberg + AWS jar를 직접 지정 (--packages 런타임 다운로드 회피 → 충돌·실패 방지).
-SPARK_JARS = (
-    "/opt/cache/jars/org.apache.iceberg_iceberg-spark-runtime-3.5_2.12-1.11.0.jar,"
-    "/opt/cache/jars/org.apache.iceberg_iceberg-aws-bundle-1.11.0.jar"
-)
+from spark_defaults import ICEBERG_JARS as SPARK_JARS, SPARK_CONF  # 공통 jar/conf
 
 default_args = {
     "owner": "data-eng",
@@ -55,8 +51,7 @@ with DAG(
         application_args=["--lookback-hours", "{{ params.lookback_hours }}"],
         jars=SPARK_JARS,
         conf={
-            "spark.driver.memory": "2g",
-            "spark.executor.memory": "4g",
+            **SPARK_CONF,
             # OOM 안전벨트(단일 worker): 동시 task 줄이고(cores↓) 셔플 파티션 잘게(메모리 분산)
             "spark.executor.cores": "2",
             "spark.sql.shuffle.partitions": "400",
@@ -71,10 +66,7 @@ with DAG(
         application="/opt/spark/work-dir/gold_aggregations.py",
         application_args=["--lookback-days", "3"],
         jars=SPARK_JARS,
-        conf={
-            "spark.driver.memory": "2g",
-            "spark.executor.memory": "4g",
-        },
+        conf=SPARK_CONF,
         verbose=False,
     )
 
@@ -88,7 +80,7 @@ with DAG(
             application="/opt/spark/work-dir/iceberg_maintenance.py",
             application_args=["--layer", layer, "--ops", "compact"],
             jars=SPARK_JARS,
-            conf={"spark.driver.memory": "2g", "spark.executor.memory": "4g"},
+            conf=SPARK_CONF,
             verbose=False,
         )
 

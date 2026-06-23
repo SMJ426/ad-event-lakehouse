@@ -38,11 +38,10 @@ from datetime import datetime, timedelta, timezone
 
 from pyspark.sql import SparkSession
 
+from spark_common import CATALOG, build_spark  # 공통 Spark 설정
+
 # ── 환경 설정 ────────────────────────────────────────────────────────────────
-S3_BUCKET = os.environ["S3_BUCKET"]
-AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-WAREHOUSE = f"s3://{S3_BUCKET}/warehouse"
-CATALOG = "glue"
+# S3_BUCKET/AWS_REGION/WAREHOUSE/CATALOG, build_spark는 spark_common에 있음.
 
 # 유지보수 대상 테이블 (카탈로그 접두 제외, "db.table" 형태)
 BRONZE_TABLES = [
@@ -64,39 +63,9 @@ TARGET_FILE_SIZE_BYTES = 134_217_728
 
 # ── Spark ────────────────────────────────────────────────────────────────────
 
-def build_spark() -> SparkSession:
-    """Iceberg Glue Catalog + S3FileIO가 설정된 SparkSession 생성.
-
-    bronze_stream / silver_processed와 동일 패턴 (카탈로그 설정 일관성 유지).
-    """
-    return (
-        SparkSession.builder.appName("iceberg-maintenance")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
-        .config(
-            f"spark.sql.catalog.{CATALOG}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.warehouse", WAREHOUSE)
-        .config(
-            f"spark.sql.catalog.{CATALOG}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.client.region", AWS_REGION)
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
-        # remove_orphan_files는 테이블 위치(s3://)를 Hadoop FileSystem으로 직접 리스팅한다.
-        # S3FileIO는 s3:// 스킴으로 쓰지만 Hadoop엔 s3 스킴 구현이 없으므로 S3A로 매핑.
-        # (적재 잡은 s3a 체크포인트만 써서 불필요했으나, 유지보수의 고아 탐색엔 필수)
-        .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .getOrCreate()
-    )
+# build_spark는 spark_common으로 이동. 단 remove_orphan_files는 테이블 위치(s3://)를 Hadoop
+# FileSystem으로 직접 리스팅하는데 Hadoop엔 s3 스킴 구현이 없어 S3A로 매핑해야 하므로,
+# 유지보수 잡은 fs.s3.impl을 extra_conf로 추가한다(적재 잡엔 불필요했던 의존성).
 
 
 # ── 메트릭 (전/후 비교용) ─────────────────────────────────────────────────────
@@ -207,7 +176,10 @@ def maintain_table(spark: SparkSession, table: str, ops: list[str], args) -> Non
 
 
 def run(args) -> None:
-    spark = build_spark()
+    spark = build_spark(
+        "iceberg-maintenance",
+        {"spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"},
+    )
     spark.sparkContext.setLogLevel("WARN")
 
     tables: list[str] = []

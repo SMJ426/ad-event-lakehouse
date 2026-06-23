@@ -36,12 +36,10 @@ from pyspark.sql.types import (
     StructType,
 )
 
-# ── 환경 설정 ────────────────────────────────────────────────────────────────
-S3_BUCKET = os.environ["S3_BUCKET"]
-AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-WAREHOUSE = f"s3://{S3_BUCKET}/warehouse"
-CATALOG = "glue"
+from spark_common import CATALOG, build_spark  # 공통 Spark 설정
 
+# ── 환경 설정 ────────────────────────────────────────────────────────────────
+# S3_BUCKET/AWS_REGION/WAREHOUSE/CATALOG, build_spark는 spark_common에서 가져온다.
 BRONZE_TABLES = ["ad_requests", "ad_impressions", "ad_clicks", "ad_conversions"]
 TARGET = f"{CATALOG}.silver.processed_events"
 
@@ -109,34 +107,7 @@ CRITEO_SCHEMA = StructType([
 ])
 
 
-# ── Spark ────────────────────────────────────────────────────────────────────
-
-def build_spark() -> SparkSession:
-    """Iceberg Glue Catalog + S3FileIO가 설정된 SparkSession 생성. (bronze_stream과 동일 패턴)"""
-    return (
-        SparkSession.builder.appName("silver-processed")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
-        .config(
-            f"spark.sql.catalog.{CATALOG}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.warehouse", WAREHOUSE)
-        .config(
-            f"spark.sql.catalog.{CATALOG}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.client.region", AWS_REGION)
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
-        .getOrCreate()
-    )
+# build_spark는 spark_common으로 이동 (bronze/gold/maintenance와 공통).
 
 
 def ensure_table(spark: SparkSession) -> None:
@@ -379,7 +350,7 @@ def merge_into(spark: SparkSession, final_df: DataFrame) -> None:
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def run(window_days: int, hour: int | None = None, lookback_hours: int | None = None) -> None:
-    spark = build_spark()
+    spark = build_spark("silver-processed")
     spark.sparkContext.setLogLevel("WARN")
 
     ensure_table(spark)

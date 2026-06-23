@@ -34,10 +34,10 @@ try:  # PySpark 3.5+
 except ImportError:  # 구버전 호환
     from pyspark.sql.utils import StreamingQueryException
 
+from spark_common import S3_BUCKET, CATALOG, build_spark  # 공통 Spark 설정
+
 # ── 환경 설정 ────────────────────────────────────────────────────────────────
-S3_BUCKET = os.environ["S3_BUCKET"]
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
-AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 # 배치당 읽는 메시지 수. 소비속도 = 이 값 / trigger(60s). 인프라단에서 조절.
 MAX_OFFSETS_PER_TRIGGER = os.environ.get("MAX_OFFSETS_PER_TRIGGER", "20000")
 
@@ -56,12 +56,10 @@ APP_ENV = os.environ.get("APP_ENV", "dev")
 SERVICE_NAME = "bronze-stream (Kafka→Iceberg Bronze)"
 KST = timezone(timedelta(hours=9))
 
-WAREHOUSE = f"s3://{S3_BUCKET}/warehouse"
 # 체크포인트는 durable·공유 가능한 스토리지여야 한다 (장애 복구 시 offset 기준).
 # Iceberg 데이터는 S3FileIO(s3://)로 쓰지만, Spark 스트리밍 체크포인트는 Hadoop
 # FileSystem을 쓰므로 s3a:// 스킴 + hadoop-aws가 필요하다.
 CHECKPOINT = os.environ.get("CHECKPOINT_LOCATION", f"s3a://{S3_BUCKET}/checkpoints/bronze")
-CATALOG = "glue"
 DB = "bronze"
 
 TOPICS = ["ad-requests", "ad-impressions", "ad-clicks", "ad-conversions"]
@@ -75,38 +73,8 @@ TOPIC_TO_TABLE = {
 }
 
 
-def build_spark() -> SparkSession:
-    """Iceberg Glue Catalog + S3FileIO가 설정된 SparkSession 생성."""
-    return (
-        SparkSession.builder.appName("bronze-stream")
-        # 배치 안의 개별 task가 실패하면 Spark가 자동 재시도하는 횟수(기본 4).
-        # 이게 가장 아래 층 재시도이고, 그 위에 main()의 "쿼리 재시작 루프"가 있다.
-        .config("spark.task.maxFailures", "4")
-        # Iceberg SQL 확장 활성화
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        # 'glue' 카탈로그를 Iceberg + AWS Glue Catalog로 연결
-        .config(f"spark.sql.catalog.{CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
-        .config(
-            f"spark.sql.catalog.{CATALOG}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.warehouse", WAREHOUSE)
-        .config(
-            f"spark.sql.catalog.{CATALOG}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        .config("spark.sql.catalog.glue.client.region", AWS_REGION)
-        # s3a (스트리밍 체크포인트용 Hadoop FileSystem) 설정
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
-        .getOrCreate()
-    )
+# build_spark는 spark_common으로 이동. task.maxFailures(배치 task 자동 재시도, 기본 4)는
+# 잡별 설정이라 extra_conf로 주입한다 — main()의 "쿼리 재시작 루프"보다 한 층 아래 재시도.
 
 
 def ensure_tables(spark: SparkSession) -> None:
@@ -256,7 +224,7 @@ def write_batch(batch_df, epoch_id: int) -> None:
 
 
 def main() -> None:
-    spark = build_spark()
+    spark = build_spark("bronze-stream", {"spark.task.maxFailures": "4"})
     spark.sparkContext.setLogLevel("WARN")
 
     ensure_tables(spark)

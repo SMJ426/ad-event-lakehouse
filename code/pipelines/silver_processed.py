@@ -178,20 +178,35 @@ def ensure_table(spark: SparkSession) -> None:
 
 # ── 1. sliding window 읽기 ───────────────────────────────────────────────────
 
-def read_bronze_window(spark: SparkSession, window_days: int, hour: int | None = None) -> DataFrame:
-    """Bronze 4개 테이블에서 최근 window_days일치(dt 기준)만 읽어 union.
+def read_bronze_window(
+    spark: SparkSession,
+    window_days: int,
+    hour: int | None = None,
+    lookback_hours: int | None = None,
+) -> DataFrame:
+    """Bronze 4개 테이블에서 대상 구간만 읽어 union.
 
     각 테이블 스키마 동일: key, value, topic, kafka_partition, kafka_offset,
     kafka_timestamp, ingested_at, dt, hour. 필요한 value/ingested_at만 사용.
 
+    두 읽기 모드:
+      - sliding(기본): dt >= current_date - window_days (일배치용).
+      - incremental: lookback_hours 지정 시 ingested_at >= now - N시간 (15분 등 잦은 배치용).
+        Bronze 적재시각 기준이라 늦게 도착한 데이터도 도착 시점에 잡힘. 매 실행 전체 재독 방지.
+
     hour 지정 시 해당 시(hour) 파티션만 읽는다 — 검증/개발용 슬라이스 축소.
-    (퍼널 쌍은 같은 시각에 도착해 같은 hour라 conversion↔click 매칭 보존)
     """
     parts = []
     for t in BRONZE_TABLES:
-        df = spark.table(f"{CATALOG}.bronze.{t}").where(
-            F.col("dt") >= F.date_format(F.date_sub(F.current_date(), window_days), "yyyy-MM-dd")
-        )
+        df = spark.table(f"{CATALOG}.bronze.{t}")
+        if lookback_hours is not None:
+            df = df.where(
+                F.col("ingested_at") >= F.expr(f"current_timestamp() - INTERVAL {int(lookback_hours)} HOURS")
+            )
+        else:
+            df = df.where(
+                F.col("dt") >= F.date_format(F.date_sub(F.current_date(), window_days), "yyyy-MM-dd")
+            )
         if hour is not None and hour >= 0:   # -1 또는 None = 전체 hour
             df = df.where(F.col("hour") == hour)
         parts.append(df.select("value", "ingested_at"))
@@ -363,14 +378,15 @@ def merge_into(spark: SparkSession, final_df: DataFrame) -> None:
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
-def run(window_days: int, hour: int | None = None) -> None:
+def run(window_days: int, hour: int | None = None, lookback_hours: int | None = None) -> None:
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
 
     ensure_table(spark)
-    print(f"[INFO] Silver 정제 시작 | window_days={window_days} | hour={hour} | target={TARGET}")
+    mode = f"incremental lookback_hours={lookback_hours}" if lookback_hours is not None else f"sliding window_days={window_days}"
+    print(f"[INFO] Silver 정제 시작 | mode={mode} | hour={hour} | target={TARGET}")
 
-    raw = read_bronze_window(spark, window_days, hour)
+    raw = read_bronze_window(spark, window_days, hour, lookback_hours)
     unified = parse_dummy(raw).unionByName(parse_criteo(raw))
 
     # 품질 검증: 무효 행은 drop하고 valid만 다음 단계로. 제거 사유·건수는 로그로 관측.
@@ -397,5 +413,8 @@ if __name__ == "__main__":
                    help="Bronze에서 거슬러 읽을 일수 (sliding window). 기본 7.")
     p.add_argument("--hour", type=int, default=None,
                    help="특정 시(hour) 파티션만 처리 (검증/개발용 슬라이스 축소). 기본 전체.")
+    p.add_argument("--lookback-hours", type=int, default=None,
+                   help="incremental: Bronze ingested_at 기준 최근 N시간만 읽음 (잦은 배치용). "
+                        "지정 시 --window-days 무시.")
     args = p.parse_args()
-    run(args.window_days, args.hour)
+    run(args.window_days, args.hour, args.lookback_hours)

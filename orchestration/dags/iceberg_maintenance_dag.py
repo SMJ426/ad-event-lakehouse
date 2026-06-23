@@ -42,13 +42,13 @@ default_args = {
 }
 
 
-def _op(task_id: str, layer: str, op: str) -> SparkSubmitOperator:
+def _op(task_id: str, layer: str, op: str, *extra: str) -> SparkSubmitOperator:
     """지정 레이어에 단일 유지보수 연산(op)을 실행하는 태스크 생성."""
     return SparkSubmitOperator(
         task_id=task_id,
         conn_id="spark_default",                       # spark://spark-master:7077
         application=APP,                               # 마운트된 최신 코드
-        application_args=["--layer", layer, "--ops", op],
+        application_args=["--layer", layer, "--ops", op, *extra],
         jars=SPARK_JARS,
         conf=SPARK_CONF,
         verbose=False,
@@ -68,7 +68,8 @@ with DAG(
 
     # 순서: bronze 압축(새 스냅샷) → expire(구 스냅샷 제거) → orphan(고아 파일 회수)
     compact_bronze = _op("compact_bronze", "bronze", "compact")   # streaming이라 주기로
-    expire = _op("expire", "all", "expire")                       # 전 레이어(bronze+silver+gold)
+    # 고빈도(15분) 메달리온이라 스냅샷이 빨리 쌓임 → 보존 2일로 단축(time-travel 창도 2일)
+    expire = _op("expire", "all", "expire", "--snapshot-retention-days", "2")
     orphan = _op("orphan", "all", "orphan")
 
     compact_bronze >> expire >> orphan

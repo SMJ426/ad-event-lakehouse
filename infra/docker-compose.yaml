@@ -12,10 +12,6 @@
 # 종료:
 #   docker compose down        # 컨테이너 종료, 볼륨 유지 (메시지 보존)
 #   docker compose down -v     # 컨테이너 + 볼륨 전부 삭제 (완전 초기화)
-#
-# 호스트에서 직접 producer를 돌리고 싶으면 (개발 중 빠른 반복):
-#   docker compose up -d kafka kafka-init   # 인프라만 기동
-#   cd ../code/producers && python dummy_producer.py
 
 services:
   # ════════════════════════════════════════════════════════════════════════

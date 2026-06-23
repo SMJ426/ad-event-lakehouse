@@ -6,8 +6,7 @@ dummy_producer.py — 합성 광고 이벤트 무한 생성 Producer
   생성하여 Kafka로 무한 전송한다. 파이프라인의 주요 볼륨 소스.
 
 실행:
-  python dummy_producer.py           # Kafka로 실제 전송
-  DRY_RUN=true python dummy_producer.py  # Kafka 미전송, 이벤트 구조 출력만
+  컨테이너로 실행한다 (compose가 KAFKA_BOOTSTRAP_SERVERS를 주입).
 
 퍼널(깔때기) 흐름 (1 auction = 1 루프 반복):
   auction_id 생성
@@ -18,7 +17,6 @@ dummy_producer.py — 합성 광고 이벤트 무한 생성 Producer
   time.sleep(1 / DUMMY_EPS) 후 다음 auction
 """
 
-import os
 import random
 import time
 import uuid
@@ -28,11 +26,6 @@ from confluent_kafka import Producer
 
 import config
 from common.schema import AdEvent, to_topic
-
-# ── DRY_RUN 설정 ───────────────────────────────────────────────────────────────
-# DRY_RUN=True: Kafka 미전송, 이벤트를 stdout에 출력만 한다.
-# EKS Kafka가 없는 개발 단계에서 이벤트 구조를 검증할 때 사용.
-DRY_RUN: bool = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 # ── 정적 데이터 풀 ─────────────────────────────────────────────────────────────
 # 사전 정의된 캠페인 목록 (50개).
@@ -214,19 +207,16 @@ def run() -> None:
     """
     광고 이벤트를 무한 생성하여 Kafka로 전송한다.
 
-    DRY_RUN=True 이면 Kafka 연결 없이 이벤트를 stdout에 출력만 한다.
     Ctrl+C 로 종료 시 미전송 메시지를 flush한 뒤 종료한다.
     """
-    producer = None
-    if not DRY_RUN:
-        producer = Producer({"bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS})
-        print(f"[INFO] Kafka 연결: {config.KAFKA_BOOTSTRAP_SERVERS}")
+    producer = Producer({"bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS})
+    print(f"[INFO] Kafka 연결: {config.KAFKA_BOOTSTRAP_SERVERS}")
 
     interval = 1.0 / config.DUMMY_EPS
     auction_count = 0
     max_auctions = config.DUMMY_MAX_AUCTIONS
 
-    print(f"[INFO] 더미 생성기 시작 | EPS={config.DUMMY_EPS} | DRY_RUN={DRY_RUN}")
+    print(f"[INFO] 더미 생성기 시작 | EPS={config.DUMMY_EPS}")
     print(f"[INFO] MAX_AUCTIONS={'무제한' if max_auctions <= 0 else f'{max_auctions:,}건 후 종료'}")
 
     try:
@@ -260,26 +250,25 @@ def run() -> None:
 
             # 2. request: 항상 발행
             req = _make_event("request", **event_kwargs)
-            _emit(producer, req)
+            _produce(producer, req)
 
             # 3. impression: FILL_RATE(80%) 확률로 발행
             if random.random() < config.FILL_RATE:
                 imp = _make_event("impression", **event_kwargs)
-                _emit(producer, imp)
+                _produce(producer, imp)
 
                 # 4. click: CTR(2.5%) 확률로 발행
                 if random.random() < config.CTR:
                     clk = _make_event("click", **event_kwargs)
-                    _emit(producer, clk)
+                    _produce(producer, clk)
 
                     # 5. conversion: CVR(3.5%) 확률로 발행
                     if random.random() < config.CVR:
                         conv = _make_event("conversion", **event_kwargs)
-                        _emit(producer, conv)
+                        _produce(producer, conv)
 
             # Kafka 비동기 전송 큐 처리 (0 = 블로킹 없이 즉시 반환)
-            if producer:
-                producer.poll(0)
+            producer.poll(0)
 
             auction_count += 1
 
@@ -295,19 +284,8 @@ def run() -> None:
 
     except KeyboardInterrupt:
         print("\n[INFO] 종료 신호 수신. 미전송 메시지 flush 중...")
-        if producer:
-            producer.flush()
+        producer.flush()
         print(f"[INFO] 종료 완료. 총 {auction_count:,}건 처리.")
-
-
-def _emit(producer: Producer | None, event: AdEvent) -> None:
-    """
-    DRY_RUN 여부에 따라 Kafka 전송 또는 stdout 출력을 선택한다.
-    """
-    if DRY_RUN:
-        print(f"[DRY_RUN] topic={to_topic(event)} | {event.to_json_bytes().decode()}")
-    else:
-        _produce(producer, event)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ dummy_producer.py — 합성 광고 이벤트 무한 생성 Producer
 """
 
 import random
+import signal
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -207,8 +209,11 @@ def run() -> None:
     """
     광고 이벤트를 무한 생성하여 Kafka로 전송한다.
 
-    Ctrl+C 로 종료 시 미전송 메시지를 flush한 뒤 종료한다.
+    종료(docker stop=SIGTERM · MAX 도달 · 예외)든 finally에서 미전송 메시지를 flush한 뒤 끝낸다.
     """
+    # docker stop이 보내는 SIGTERM을 SystemExit로 바꿔 아래 finally(flush)가 실행되게 한다.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
     producer = Producer({"bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS})
     print(f"[INFO] Kafka 연결: {config.KAFKA_BOOTSTRAP_SERVERS}")
 
@@ -282,8 +287,8 @@ def run() -> None:
 
             time.sleep(interval)
 
-    except KeyboardInterrupt:
-        print("\n[INFO] 종료 신호 수신. 미전송 메시지 flush 중...")
+    finally:
+        print("\n[INFO] 종료 — 미전송 메시지 flush 중...")
         producer.flush()
         print(f"[INFO] 종료 완료. 총 {auction_count:,}건 처리.")
 

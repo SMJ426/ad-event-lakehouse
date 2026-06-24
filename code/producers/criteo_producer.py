@@ -26,11 +26,11 @@ Bronze = raw 원칙:
   cost=0.0 (click 이전 단계, 비용 미발생).
 
 실행:
-  python criteo_producer.py               # Kafka로 실제 전송
-  DRY_RUN=true python criteo_producer.py  # Kafka 미전송, 이벤트 구조 출력만
+  컨테이너로 실행한다 (compose가 KAFKA_BOOTSTRAP_SERVERS를 주입).
 """
 
-import os
+import signal
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -40,9 +40,6 @@ from datasets import load_dataset
 
 import config
 from common.schema import CriteoRawEvent, to_topic
-
-# ── DRY_RUN 설정 ───────────────────────────────────────────────────────────────
-DRY_RUN: bool = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 
 # ── 유틸 ───────────────────────────────────────────────────────────────────────
@@ -113,13 +110,6 @@ def _produce(producer: Producer, event: CriteoRawEvent) -> None:
     )
 
 
-def _emit(producer, event: CriteoRawEvent) -> None:
-    if DRY_RUN:
-        print(f"[DRY_RUN] topic={to_topic(event)} | {event.to_json_bytes().decode()}")
-    else:
-        _produce(producer, event)
-
-
 # ── 메인 루프 ──────────────────────────────────────────────────────────────────
 
 def run() -> None:
@@ -132,12 +122,13 @@ def run() -> None:
       3. click      × 1건  — Criteo 원본 cost 사용
       4. conversion × 1건  — row["conversion"] == 1 인 경우만
 
-    Ctrl+C 로 종료 시 미전송 메시지 flush 후 종료.
+    종료(docker stop=SIGTERM · MAX 도달 · 예외)든 finally에서 미전송 메시지를 flush한 뒤 끝낸다.
     """
-    producer = None
-    if not DRY_RUN:
-        producer = Producer({"bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS})
-        print(f"[INFO] Kafka 연결: {config.KAFKA_BOOTSTRAP_SERVERS}")
+    # docker stop이 보내는 SIGTERM을 SystemExit로 바꿔 아래 finally(flush)가 실행되게 한다.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    producer = Producer({"bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS})
+    print(f"[INFO] Kafka 연결: {config.KAFKA_BOOTSTRAP_SERVERS}")
 
     print(f"[INFO] Criteo 데이터셋 로드 중: {config.CRITEO_DATASET_NAME}")
     print(f"[INFO] Bronze=raw 모드 | 파생 컬럼(banner_id, bid_price 등)은 Silver에서 생성")
@@ -152,7 +143,7 @@ def run() -> None:
     total_events = 0
 
     max_rows = config.CRITEO_MAX_ROWS
-    print(f"[INFO] 재생 시작 | DRY_RUN={DRY_RUN} | REPLAY_INTERVAL={config.CRITEO_REPLAY_INTERVAL}s")
+    print(f"[INFO] 재생 시작 | REPLAY_INTERVAL={config.CRITEO_REPLAY_INTERVAL}s")
     print(f"[INFO] click 1건당: request×{config.REQUESTS_PER_CLICK} + impression×{config.IMPRESSIONS_PER_CLICK} + click×1 (+ conversion 조건부)")
     print(f"[INFO] MAX_ROWS={'무제한' if max_rows <= 0 else f'{max_rows:,}행 후 종료'}")
 
@@ -162,21 +153,20 @@ def run() -> None:
 
             # 1. request × 50건 (합성, cost=0.0)
             for _ in range(config.REQUESTS_PER_CLICK):
-                _emit(producer, _build_event("request", row, auction_id))
+                _produce(producer, _build_event("request", row, auction_id))
 
             # 2. impression × 40건 (합성, cost=0.0)
             for _ in range(config.IMPRESSIONS_PER_CLICK):
-                _emit(producer, _build_event("impression", row, auction_id))
+                _produce(producer, _build_event("impression", row, auction_id))
 
             # 3. click × 1건 (Criteo 원본)
-            _emit(producer, _build_event("click", row, auction_id))
+            _produce(producer, _build_event("click", row, auction_id))
 
             # 4. conversion (row["conversion"] == 1 인 경우만)
             if row.get("conversion") == 1:
-                _emit(producer, _build_event("conversion", row, auction_id))
+                _produce(producer, _build_event("conversion", row, auction_id))
 
-            if producer:
-                producer.poll(0)
+            producer.poll(0)
 
             row_count += 1
             total_events += config.REQUESTS_PER_CLICK + config.IMPRESSIONS_PER_CLICK + 1
@@ -193,12 +183,10 @@ def run() -> None:
             if config.CRITEO_REPLAY_INTERVAL > 0:
                 time.sleep(config.CRITEO_REPLAY_INTERVAL)
 
-    except KeyboardInterrupt:
-        print("\n[INFO] 종료 신호 수신. 미전송 메시지 flush 중...")
-        if producer:
-            producer.flush()
-
-    print(f"[INFO] 재생 완료. 총 {row_count:,}행 처리 | 총 이벤트 약 {total_events:,}건 발행")
+    finally:
+        print("\n[INFO] 종료 — 미전송 메시지 flush 중...")
+        producer.flush()
+        print(f"[INFO] 재생 완료. 총 {row_count:,}행 처리 | 총 이벤트 약 {total_events:,}건 발행")
 
 
 if __name__ == "__main__":

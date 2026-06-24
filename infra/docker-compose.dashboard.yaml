@@ -23,7 +23,7 @@ services:
     ports:
       - "8086:8080"   # Trino UI / 클라이언트 (호스트 8086)
     environment:
-      AWS_REGION: ap-northeast-2
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
       # AWS SDK 기본 체인이 마운트된 ~/.aws(default 프로파일)를 읽도록 경로 지정
       AWS_SHARED_CREDENTIALS_FILE: /etc/trino/.aws/credentials
       AWS_CONFIG_FILE: /etc/trino/.aws/config

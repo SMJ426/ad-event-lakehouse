@@ -2,14 +2,20 @@
 iceberg_maintenance.py — Iceberg 테이블 유지보수 배치 잡 (compaction / expire / orphan)
 
 역할:
-  Bronze·Silver Iceberg 테이블의 메타데이터·파일을 정리한다.
+  Bronze·Silver·Gold Iceberg 테이블의 메타데이터·파일을 정리한다. (연산 로직은 여기 한 곳)
   - compaction(rewrite_data_files): small file를 target 크기로 bin-pack 병합.
   - expire_snapshots: 오래된 스냅샷 + 그에만 속한 데이터/매니페스트 제거.
   - remove_orphan_files: 어떤 스냅샷도 참조하지 않는 고아 파일 제거.
 
-왜 별도 잡인가:
-  적재(write)와 유지보수(maintenance)를 분리한다. 유지보수가 실패해도 적재
-  파이프라인(bronze_stream / silver_processed)에는 영향이 없다.
+cadence 매핑 (연산 로직은 이 모듈 한 곳, '언제 도는지'는 DAG가 결정):
+  - compaction = write-driven(쓰기가 만든 small file 정리) → 메달리온 DAG에서 쓰기 직후 인라인
+    (silver/gold). 단 Bronze는 streaming이라 '쓰기 끝' 시점이 없어 GC DAG에서 주기로.
+  - expire / orphan = time-driven(시간 지나 쌓인 것 청소) → GC DAG에서 주기로.
+    (매 쓰기마다 돌리면 헛바퀴 — 특히 orphan은 매번 테이블 전체 S3 LIST라 비쌈.)
+  → DAG는 `--layer/--ops`로 cadence만 wiring한다.
+
+왜 별도 모듈인가:
+  적재(write)와 유지보수(maintenance) 로직을 분리한다. 어떤 DAG에서 호출하든 동일 함수 사용.
 
 실행 순서(중요): compaction → expire → orphan
   컴팩션이 새 스냅샷(operation=replace)을 만든 뒤, expire가 구 스냅샷을,
@@ -32,11 +38,10 @@ from datetime import datetime, timedelta, timezone
 
 from pyspark.sql import SparkSession
 
+from spark_common import CATALOG, build_spark  # 공통 Spark 설정
+
 # ── 환경 설정 ────────────────────────────────────────────────────────────────
-S3_BUCKET = os.environ["S3_BUCKET"]
-AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-WAREHOUSE = f"s3://{S3_BUCKET}/warehouse"
-CATALOG = "glue"
+# S3_BUCKET/AWS_REGION/WAREHOUSE/CATALOG, build_spark는 spark_common에 있음.
 
 # 유지보수 대상 테이블 (카탈로그 접두 제외, "db.table" 형태)
 BRONZE_TABLES = [
@@ -46,46 +51,21 @@ BRONZE_TABLES = [
     "bronze.ad_conversions",
 ]
 SILVER_TABLES = ["silver.processed_events"]
+GOLD_TABLES = [
+    "gold.campaign_daily_stats",
+    "gold.banner_daily_stats",
+    "gold.hourly_funnel",
+]
 
-# 컴팩션 목표 파일 크기 (128MB) — Bronze/Silver 공통.
+# 컴팩션 목표 파일 크기 (128MB) — 전 레이어 공통.
 TARGET_FILE_SIZE_BYTES = 134_217_728
 
 
 # ── Spark ────────────────────────────────────────────────────────────────────
 
-def build_spark() -> SparkSession:
-    """Iceberg Glue Catalog + S3FileIO가 설정된 SparkSession 생성.
-
-    bronze_stream / silver_processed와 동일 패턴 (카탈로그 설정 일관성 유지).
-    """
-    return (
-        SparkSession.builder.appName("iceberg-maintenance")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
-        .config(
-            f"spark.sql.catalog.{CATALOG}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.warehouse", WAREHOUSE)
-        .config(
-            f"spark.sql.catalog.{CATALOG}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.client.region", AWS_REGION)
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
-        # remove_orphan_files는 테이블 위치(s3://)를 Hadoop FileSystem으로 직접 리스팅한다.
-        # S3FileIO는 s3:// 스킴으로 쓰지만 Hadoop엔 s3 스킴 구현이 없으므로 S3A로 매핑.
-        # (적재 잡은 s3a 체크포인트만 써서 불필요했으나, 유지보수의 고아 탐색엔 필수)
-        .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .getOrCreate()
-    )
+# build_spark는 spark_common으로 이동. 단 remove_orphan_files는 테이블 위치(s3://)를 Hadoop
+# FileSystem으로 직접 리스팅하는데 Hadoop엔 s3 스킴 구현이 없어 S3A로 매핑해야 하므로,
+# 유지보수 잡은 fs.s3.impl을 extra_conf로 추가한다(적재 잡엔 불필요했던 의존성).
 
 
 # ── 메트릭 (전/후 비교용) ─────────────────────────────────────────────────────
@@ -196,7 +176,10 @@ def maintain_table(spark: SparkSession, table: str, ops: list[str], args) -> Non
 
 
 def run(args) -> None:
-    spark = build_spark()
+    spark = build_spark(
+        "iceberg-maintenance",
+        {"spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"},
+    )
     spark.sparkContext.setLogLevel("WARN")
 
     tables: list[str] = []
@@ -204,6 +187,8 @@ def run(args) -> None:
         tables += BRONZE_TABLES
     if args.layer in ("silver", "all"):
         tables += SILVER_TABLES
+    if args.layer in ("gold", "all"):
+        tables += GOLD_TABLES
 
     ops = [o.strip() for o in args.ops.split(",") if o.strip()]
     print(
@@ -219,8 +204,8 @@ def run(args) -> None:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--layer", choices=["bronze", "silver", "all"], default="all",
-                   help="유지보수 대상 레이어. 기본 all.")
+    p.add_argument("--layer", choices=["bronze", "silver", "gold", "all"], default="all",
+                   help="유지보수 대상 레이어. all=bronze+silver+gold. 기본 all.")
     p.add_argument("--ops", default="compact,expire,orphan",
                    help="실행 연산(쉼표 구분): compact,expire,orphan. 기본 전체.")
     p.add_argument("--snapshot-retention-days", type=int, default=7,

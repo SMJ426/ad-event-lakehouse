@@ -11,8 +11,9 @@ FROM apache/airflow:2.10.5-python3.11
 USER root
 
 # Java 17 (Iceberg 1.11 jar는 Java17 컴파일) + procps(spark-submit이 ps 사용)
+# + fonts-nanum: 데일리 리포트 차트의 한글 라벨이 □□로 깨지지 않게 한글 폰트 설치.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openjdk-17-jdk-headless procps \
+    && apt-get install -y --no-install-recommends openjdk-17-jdk-headless procps fonts-nanum \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # 아키텍처(arm64/amd64) 무관하게 JAVA_HOME 심볼릭 링크
     && ln -s "$(dirname "$(dirname "$(readlink -f "$(which java)")")")" /opt/java17
@@ -26,5 +27,8 @@ ENV PATH="${PATH}:/opt/spark/bin"
 
 USER airflow
 
-# Spark provider (SparkSubmitOperator 제공)
-RUN pip install --no-cache-dir "apache-airflow-providers-apache-spark==4.11.*"
+# Spark provider(SparkSubmitOperator) + 데일리 리포트용 차트/Slack
+# (daily_report.py 드라이버가 client 모드로 이 컨테이너에서 돌아 matplotlib/slack_sdk를 import)
+RUN pip install --no-cache-dir \
+        "apache-airflow-providers-apache-spark==4.11.*" \
+        matplotlib slack_sdk

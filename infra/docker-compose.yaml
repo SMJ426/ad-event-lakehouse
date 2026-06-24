@@ -12,10 +12,6 @@
 # 종료:
 #   docker compose down        # 컨테이너 종료, 볼륨 유지 (메시지 보존)
 #   docker compose down -v     # 컨테이너 + 볼륨 전부 삭제 (완전 초기화)
-#
-# 호스트에서 직접 producer를 돌리고 싶으면 (개발 중 빠른 반복):
-#   docker compose up -d kafka kafka-init   # 인프라만 기동
-#   cd ../code/producers && python dummy_producer.py
 
 services:
   # ════════════════════════════════════════════════════════════════════════
@@ -147,11 +143,17 @@ services:
     environment:
       S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정 — infra/.env에 S3_BUCKET=... 기록하거나 export 필요}
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      AWS_REGION: ap-northeast-2
+      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
       AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials   # AWS SDK v2 (Iceberg S3FileIO)
       AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials  # AWS SDK v1 (hadoop-aws s3a)
       AWS_CONFIG_FILE: /opt/spark/.aws/config
       MAX_OFFSETS_PER_TRIGGER: "150000"   # 배치당 15만 → 분당 15만 소비 > 유입 ~11만 → 백로그 감소
+      # 적재 실패 시 잡 안에서 재시작(체크포인트 기준). 5회 소진하면 종료 → 아래 restart가 컨테이너 재기동.
+      MAX_STREAM_RESTARTS: "5"
+      RESTART_BACKOFF_SECONDS: "10"        # 재시작 첫 대기(초): 10→20→40→80→160
+      # 5회 소진 시 알림 보낼 Slack Webhook. infra/.env에 SLACK_WEBHOOK_URL=... 기록(없으면 알림 skip).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      APP_ENV: ${APP_ENV:-prod}   # 경보에 표기할 환경(dev/staging/prod)
     volumes:
       - ${HOME}/.aws:/opt/spark/.aws:ro          # 호스트 AWS 자격증명 (읽기전용)
       - ivy-cache:/opt/spark/.ivy2               # jar 캐시 (재다운로드 방지)

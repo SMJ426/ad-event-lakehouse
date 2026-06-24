@@ -31,12 +31,10 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-# ── 환경 설정 ────────────────────────────────────────────────────────────────
-S3_BUCKET = os.environ["S3_BUCKET"]
-AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-WAREHOUSE = f"s3://{S3_BUCKET}/warehouse"
-CATALOG = "glue"
+from spark_common import CATALOG, build_spark
 
+# ── 환경 설정 ────────────────────────────────────────────────────────────────
+# 공통 상수(S3_BUCKET/AWS_REGION/WAREHOUSE/CATALOG)와 build_spark는 spark_common에 있음.
 SILVER = f"{CATALOG}.silver.processed_events"
 CAMPAIGN_DAILY = f"{CATALOG}.gold.campaign_daily_stats"
 BANNER_DAILY = f"{CATALOG}.gold.banner_daily_stats"
@@ -44,36 +42,6 @@ HOURLY_FUNNEL = f"{CATALOG}.gold.hourly_funnel"
 
 # ROAS용 가정 단가 — 매출 데이터가 없으므로 전환당 매출을 상수로 가정한다(가정임을 명시).
 REVENUE_PER_CONVERSION = float(os.environ.get("GOLD_REVENUE_PER_CONVERSION", "10.0"))
-
-
-# ── Spark ────────────────────────────────────────────────────────────────────
-
-def build_spark() -> SparkSession:
-    """Iceberg Glue Catalog + S3FileIO SparkSession (silver_processed와 동일 패턴)."""
-    return (
-        SparkSession.builder.appName("gold-aggregations")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}", "org.apache.iceberg.spark.SparkCatalog")
-        .config(
-            f"spark.sql.catalog.{CATALOG}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.warehouse", WAREHOUSE)
-        .config(
-            f"spark.sql.catalog.{CATALOG}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        .config(f"spark.sql.catalog.{CATALOG}.client.region", AWS_REGION)
-        .config(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain",
-        )
-        .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
-        .getOrCreate()
-    )
 
 
 def ensure_tables(spark: SparkSession) -> None:
@@ -222,7 +190,7 @@ def agg_hourly_funnel(silver: DataFrame) -> DataFrame:
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def run(args) -> None:
-    spark = build_spark()
+    spark = build_spark("gold-aggregations")
     spark.sparkContext.setLogLevel("WARN")
     ensure_tables(spark)
 

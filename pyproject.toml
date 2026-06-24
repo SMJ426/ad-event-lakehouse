@@ -1,0 +1,7 @@
+# pytest 설정. (이 프로젝트는 패키징용이 아니라 테스트 설정만 둔다.)
+[tool.pytest.ini_options]
+# 테스트에서 producer 모듈을 import할 수 있게 경로 추가:
+#   import config              → code/producers/config.py
+#   from common.schema import  → code/producers/common/schema.py
+pythonpath = ["code/producers"]
+testpaths = ["tests"]

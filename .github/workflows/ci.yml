@@ -1,0 +1,24 @@
+# CI — push/PR마다 단위 테스트 자동 실행 (GitHub Actions).
+# 테스트는 Spark/Kafka 없이 도는 순수 로직만 대상이라 pytest 설치 후 바로 실행된다(가볍고 빠름).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q

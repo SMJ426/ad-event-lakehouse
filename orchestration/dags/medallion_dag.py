@@ -24,11 +24,13 @@ from airflow import DAG
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 
 from spark_defaults import ICEBERG_JARS as SPARK_JARS, SPARK_CONF  # 공통 jar/conf
+from slack_alert import slack_failure_callback                    # 실패 시 Slack 경보
 
 default_args = {
     "owner": "data-eng",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": slack_failure_callback,
 }
 
 with DAG(

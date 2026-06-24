@@ -144,7 +144,8 @@ def build_failure_alert(attempts_used: int, error_line: str) -> dict:
         err = err[:800] + " …(생략)"
     return {
         # 알림 배너/검색/폴백용 요약 (블록 미지원 클라이언트도 이 줄은 보임)
-        "text": f"🚨 [CRITICAL] Bronze 적재 실패 — 재시작 {attempts_used}회 모두 실패 ({APP_ENV}) {ts}",
+        # <!here> = @here 태깅(현재 활성 멤버 호출). 긴급 경보라 사람을 부른다.
+        "text": f"<!here> 🚨 [CRITICAL] Bronze 적재 실패 — 재시작 {attempts_used}회 모두 실패 ({APP_ENV}) {ts}",
         "attachments": [
             {
                 "color": "#D7263D",          # 위험(빨강) 스트라이프

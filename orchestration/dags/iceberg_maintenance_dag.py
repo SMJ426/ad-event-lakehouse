@@ -24,6 +24,7 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 # 공통 jar/conf (spark_defaults). 유지보수는 remove_orphan_files가 s3:// 위치를 Hadoop
 # FileSystem(S3A)으로 리스팅하므로 hadoop-aws 포함 변형을 쓴다.
 from spark_defaults import ICEBERG_JARS_WITH_HADOOP as SPARK_JARS, SPARK_CONF
+from slack_alert import slack_failure_callback   # 실패 시 Slack 경보
 
 APP = "/opt/spark/work-dir/iceberg_maintenance.py"
 
@@ -31,6 +32,7 @@ default_args = {
     "owner": "data-eng",
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": slack_failure_callback,
 }
 
 

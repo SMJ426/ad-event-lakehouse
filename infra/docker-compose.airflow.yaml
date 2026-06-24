@@ -100,6 +100,12 @@ services:
       AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials
       AWS_CREDENTIAL_PROFILES_FILE: /opt/spark/.aws/credentials
       AWS_CONFIG_FILE: /opt/spark/.aws/config
+      # 실패 경보(on_failure_callback)가 스케줄러에서 읽음. infra/.env의 SLACK_WEBHOOK_URL 사용(없으면 skip).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      APP_ENV: ${APP_ENV:-prod}
+      # 데일리 리포트(daily_report.py)용 Slack 봇 토큰 + 채널. infra/.env에 기록(없으면 콘솔 출력만).
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_REPORT_CHANNEL: ${SLACK_REPORT_CHANNEL:-}
     volumes:
       - ../orchestration/dags:/opt/airflow/dags
       - ${HOME}/.aws:/opt/spark/.aws:ro

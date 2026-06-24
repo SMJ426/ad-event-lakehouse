@@ -30,7 +30,7 @@ DUMMY_EPS = 100
 DUMMY_MAX_AUCTIONS = int(os.environ.get("DUMMY_MAX_AUCTIONS", "0"))
 # 처리할 최대 auction 수. 0 = 무제한(계속 생성).
 # 데이터 양을 결정적으로 제어하기 위한 상한 — 이 수만큼 처리 후 자동 종료.
-# auction 1건 ≈ request1 + (impression/click/conversion 확률적). [[criteo_max_rows]]와 대칭.
+# auction 1건 ≈ request1 + (impression/click/conversion 확률적). CRITEO_MAX_ROWS와 대칭.
 
 # ── Criteo 재생 속도 ───────────────────────────────────────────────────────────
 CRITEO_REPLAY_INTERVAL = float(os.environ.get("CRITEO_REPLAY_INTERVAL", "0.0"))

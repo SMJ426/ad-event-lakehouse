@@ -1,7 +1,7 @@
-# Silver 오케스트레이션 스택 (Airflow + Spark standalone 클러스터)
+# 파이프라인 오케스트레이션 스택 (Airflow + Spark standalone 클러스터)
 #
 # Bronze 스트리밍 스택(docker-compose.yaml)과 분리된 별도 스택이다.
-# Silver는 S3의 Bronze만 읽으므로 kafka/producer가 필요 없다.
+# Silver·Gold·유지보수·헬스체크·리포트 잡을 돌린다. S3의 데이터만 읽어 kafka/producer는 불필요.
 #
 # 실행:
 #   1) Spark 클러스터만:  docker compose -f docker-compose.airflow.yaml up -d spark-master spark-worker
@@ -42,7 +42,7 @@ services:
     volumes:
       - ${HOME}/.aws:/opt/spark/.aws:ro
       - ivy-cache:/opt/spark/.ivy2
-      - ../code/pipelines:/opt/spark/work-dir:ro   # 최신 silver 잡 코드 라이브 반영
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 파이프라인 잡 코드 라이브 반영
 
   spark-worker:
     image: infra-spark-bronze:latest
@@ -56,12 +56,12 @@ services:
       - spark://spark-master:7077
     environment:
       <<: *spark-env
-      SPARK_WORKER_MEMORY: 5g    # silver 잡(dedup/MERGE)이 무거워 넉넉히
+      SPARK_WORKER_MEMORY: 5g    # Spark 잡(특히 silver dedup/MERGE)이 무거워 넉넉히
       SPARK_WORKER_CORES: 4
     volumes:
       - ${HOME}/.aws:/opt/spark/.aws:ro
       - ivy-cache:/opt/spark/.ivy2
-      - ../code/pipelines:/opt/spark/work-dir:ro   # 최신 silver 잡 코드 라이브 반영
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 파이프라인 잡 코드 라이브 반영
 
   # ════════════════════════════════════════════════════════════════════════
   # Airflow (공식 multi-container, LocalExecutor)
@@ -94,7 +94,7 @@ services:
       AIRFLOW__CORE__FERNET_KEY: "ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg="
       # webserver↔scheduler 로그 서버 인증용 — 모든 컴포넌트가 같은 값이어야 UI 로그 조회 가능
       AIRFLOW__WEBSERVER__SECRET_KEY: "ad-lakehouse-silver-airflow-secret-key-fixed"
-      # silver 잡(드라이버)이 쓸 값
+      # Spark 잡(드라이버)이 쓸 값
       S3_BUCKET: ${S3_BUCKET:?S3_BUCKET 미설정}
       AWS_REGION: ${AWS_REGION:-ap-northeast-2}
       AWS_SHARED_CREDENTIALS_FILE: /opt/spark/.aws/credentials
@@ -109,7 +109,7 @@ services:
     volumes:
       - ../orchestration/dags:/opt/airflow/dags
       - ${HOME}/.aws:/opt/spark/.aws:ro
-      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 파이프라인 잡 코드
       - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
     entrypoint: /bin/bash
     command:
@@ -133,7 +133,7 @@ services:
     volumes:
       - ../orchestration/dags:/opt/airflow/dags
       - ${HOME}/.aws:/opt/spark/.aws:ro
-      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 파이프라인 잡 코드
       - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
       - airflow-logs:/opt/airflow/logs             # task 로그 영속화 + webserver와 공유(404 방지)
     command: scheduler
@@ -150,7 +150,7 @@ services:
     volumes:
       - ../orchestration/dags:/opt/airflow/dags
       - ${HOME}/.aws:/opt/spark/.aws:ro
-      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 최신 silver 잡
+      - ../code/pipelines:/opt/spark/work-dir:ro   # 드라이버(client 모드)가 쓸 파이프라인 잡 코드
       - ivy-cache:/opt/cache:ro                    # 캐시된 Iceberg/AWS jar (--jars로 사용)
       - airflow-logs:/opt/airflow/logs             # scheduler가 쓴 task 로그를 직접 읽음(served-logs 404 회피)
     ports:

@@ -61,9 +61,15 @@ docker compose -f docker-compose.dashboard.yaml up -d --build
 
 ## 산출물
 
-- [`trino_queries.sql`](trino_queries.sql) — 차트 뒤 SQL(두 탭 전체).
-- `screenshots/` — 비즈니스 KPI 탭 + 운영 메트릭 탭 캡처(발표/제출용).
-- (선택) Superset UI에서 대시보드 완성 후 **Settings → Export**로 zip 내보내 이 폴더에 보관하면 재현 가능.
+- [`trino_queries.sql`](trino_queries.sql) — 차트 뒤 SQL(두 탭 전체, Trino에서 동작 검증됨).
+- **[`superset_operational_dashboard.zip`](superset_operational_dashboard.zip)** — 운영 메트릭 탭
+  (DB 연결 + 데이터셋 5 + 차트 5 + 대시보드)을 그대로 재현하는 Superset import 번들.
+- `screenshots/` — 비즈니스 KPI 탭 + 운영 메트릭 탭 캡처(발표/제출용, UI에서 사용자가 캡처).
+
+### 운영 메트릭 탭 재현 (import)
+스택 기동 후 Superset UI: **Settings → Import Dashboards** → `superset_operational_dashboard.zip` 선택.
+→ "운영 메트릭 (Operational Metrics)" 대시보드가 자동 생성된다(신선도/일자별 행수/파일 상태/스냅샷/중복
+5개 차트, Trino 메타테이블 기반). 번들에 DB 연결·데이터셋·차트·대시보드가 모두 포함돼 한 번에 재현됨.
 
 ## 종료
 

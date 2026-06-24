@@ -175,6 +175,38 @@ WHEN MATCHED AND NOT (t.col1 <=> s.col1 AND t.col2 <=> s.col2 AND ...) THEN UPDA
 
 ## 5. 운영 헬스 체크 쿼리 모음
 
+> **평가기준 ①** "운영자가 매일 5분 안에 파이프라인 헬스체크를 할 수 있는가" — Iceberg 메타테이블
+> (`$snapshots`/`$files`) 기반 헬스체크를 **두 화면**으로 제공한다: ⓐ 한 명령 자동 리포트(깊게),
+> ⓑ 대시보드 운영 메트릭 탭(매일 슥 — §6).
+
+### ⓐ 한 명령 헬스 리포트 — [`pipeline_health.py`](code/pipelines/pipeline_health.py)
+```bash
+spark-submit pipeline_health.py
+#   임계값 조절: --freshness-min 30 --min-file-mb 32 --max-snapshots 200
+```
+Iceberg 메타테이블 + 간단 집계로 **8종 체크를 자동 판정**(✅OK / ⚠️WARN / ❌FAIL)해 리포트로 출력.
+운영자는 **빨간 것(WARN/FAIL)만** 보면 된다. **FAIL이 하나라도 있으면 exit 1**(Airflow/Slack 게이트 확장 가능).
+
+| # | 체크 | 근거(메타/집계) | 판정 |
+|---|---|---|---|
+| 1 | 신선도 | bronze=`$snapshots` 최신 committed_at, silver/gold=max(updated_at) | 임계(분) 초과 WARN |
+| 2 | small file | `$files` 파일 수·평균 크기 | 평균<32MB & 파일>5 → WARN(컴팩션) |
+| 3 | 스냅샷 누적 | `$snapshots` count | 임계 초과 WARN(expire) |
+| 4 | 처리량 | silver 오늘(updated_at) 처리 행수 | 0이면 WARN |
+| 5 | 중복 | silver `count(*)-count(distinct event_id)` | >0 FAIL |
+| 6 | 퍼널 정합 | gold requests≥impressions≥clicks≥conversions | 위반 FAIL |
+| 7 | 비율 범위 | gold fill_rate/ctr/cvr ∈ [0,1] | 이탈 FAIL |
+| 8 | cost 정합 | gold cost == silver click cost 합(CPC) | 불일치 WARN |
+
+> 예시 출력: `종합: 29개 체크 | ❌ 0 FAIL · ⚠️ 5 WARN · ✅ 24 OK` (WARN=신선도·small file 주의).
+
+### ⓑ 대시보드 운영 메트릭 탭 → §6 (신선도/일자별 행수/파일 상태/스냅샷/중복을 시각화)
+
+### 심화 참조 SQL (엔진별 단건 조회)
+- [`code/health-queries/`](code/health-queries/) — `bronze_checks` / `silver_checks` / `gold_checks` /
+  `maintenance_checks` (spark-sql·Athena 기준 상세 검증 쿼리).
+- [`dashboard/trino_queries.sql`](dashboard/trino_queries.sql) 탭 B — 운영 메트릭 Trino 쿼리(대시보드 차트 뒤).
+
 ## 6. 대시보드 (스크린샷 + 운영 메트릭)
 
 **스택**: `Superset(BI) → Trino(쿼리엔진) → Glue Catalog + Iceberg → S3`. Spark가 write, Trino가 read.

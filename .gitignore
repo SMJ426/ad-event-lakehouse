@@ -89,3 +89,15 @@ Desktop.ini
 
 *.log
 logs/
+
+# ── 발표 / 세션 산출물 ─────────────────────────────────────────────────────────
+# 레포엔 slides.pdf + slides_img/ 만 유지(발표 산출물 + README 임베드용 근거 스샷).
+# 아래는 인터랙티브 덱·편집용 백업·중복 제출 번들·작업 원고·세션 디렉토리라 제외.
+
+.claude/
+/slides.html
+/slides_editable_backup.html
+/slides_submit/
+/slides_submit.zip
+/docs/slides_outline.md
+/docs/slides_script.md
